@@ -1,10 +1,7 @@
 # requirements.txt - Recipe Extractor API Dependencies
-fastapi==0.109.2
-uvicorn==0.27.1
-python-dotenv==1.0.1
-openai>=1.30.0
-pydantic>=2,<3
-python-multipart==0.0.9
-# Video processing dependencies
-yt-dlp>=2023.12.30
-pysrt>=1.1.2
+openai>=1.21.0
+fastapi
+uvicorn[standard]
+yt-dlp
+pysrt
+python-dotenv
