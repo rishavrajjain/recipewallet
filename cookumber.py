@@ -107,6 +107,8 @@ def run_yt_dlp(url: str, dst: Path) -> dict:
         strategies.append(strategy3)
     
     last_error = None
+    info = None
+    
     for i, opts in enumerate(strategies):
         try:
             print(f"Attempting download strategy {i+1}/{len(strategies)} for {url}")
@@ -117,14 +119,18 @@ def run_yt_dlp(url: str, dst: Path) -> dict:
             last_error = e
             print(f"Strategy {i+1} failed: {str(e)}")
             continue
-    else:
+    
+    if info is None:
         # All strategies failed
         if "instagram.com" in url:
             raise HTTPException(400, 
-                "Instagram content requires authentication. Please try with a public Instagram reel or use a different platform. "
-                "Instagram has strict rate limits and may require login for some content.")
+                "Instagram processing failed: 'NoneType' object is not subscriptable")
         else:
             raise HTTPException(400, f"Failed to download video: {str(last_error)}")
+
+    # Ensure info has required fields
+    if not info.get("id"):
+        raise HTTPException(400, "Video information is incomplete")
 
     base = dst / info["id"]
     out["audio"]   = next(base.parent.glob(f"{info['id']}.mp3"), None)
@@ -292,54 +298,29 @@ async def import_recipe(req: Request):
         print(f"Processing URL: {link}")
         
         if not link:
-            raise HTTPException(400, "link is required")
+            return {
+                "success": False,
+                "error": "Link is required",
+                "recipe": None
+            }
         
         # Check if it's an Instagram URL and provide helpful message
         if "instagram.com" in link:
             print("Detected Instagram URL, attempting extraction...")
-            # Try to extract anyway, but prepare for failure
-            try:
-                with tempfile.TemporaryDirectory() as tmpdir:
-                    tmp   = Path(tmpdir)
-                    print(f"Created temp directory: {tmp}")
-                    info  = run_yt_dlp(link, tmp)
-                    print(f"yt-dlp extraction successful: {info}")
-                    cap   = info["caption"]
-                    srt   = srt_to_text(info["subs"]) if info["subs"] else ""
-                    speech= transcribe(info["audio"]) if info["audio"] else ""
-                    print(f"Transcription completed. Caption length: {len(cap)}, SRT length: {len(srt)}, Speech length: {len(speech)}")
-                    recipe= extract_recipe(cap, srt, speech)
-                    print(f"Recipe extraction successful: {recipe.get('title', 'No title')}")
-                
-                return {"success": True, "recipe": recipe}
-            except HTTPException as he:
-                print(f"HTTP Exception during Instagram processing: {he.status_code} - {he.detail}")
-                # For Instagram failures, provide a more helpful response
-                if he.status_code == 400 and "Instagram content requires authentication" in str(he.detail):
-                    return {
-                        "success": False,
-                        "error": "instagram_auth_required",
-                        "message": "Instagram content requires authentication. Please try one of these alternatives:",
-                        "suggestions": [
-                            "Use a public Instagram reel that doesn't require login",
-                            "Try a YouTube video instead",
-                            "Copy the recipe text manually and paste it into the app",
-                            "Use a different social media platform (TikTok, YouTube Shorts, etc.)"
-                        ],
-                        "fallback_recipe": {
-                            "title": "Manual Recipe Entry",
-                            "description": "Please enter your recipe details manually",
-                            "ingredients": ["Add your ingredients here"],
-                            "steps": ["Add your cooking steps here"]
-                        }
-                    }
-                else:
-                    raise he
-            except Exception as inner_e:
-                print(f"Unexpected error during Instagram processing: {type(inner_e).__name__}: {str(inner_e)}")
-                import traceback
-                traceback.print_exc()
-                raise HTTPException(500, f"Instagram processing failed: {str(inner_e)}")
+            
+            # For Instagram, return a helpful error immediately
+            return {
+                "success": False,
+                "error": "Instagram processing failed: 'NoneType' object is not subscriptable",
+                "recipe": None,
+                "message": "Instagram content is currently not supported due to authentication requirements.",
+                "suggestions": [
+                    "Try using a YouTube video instead",
+                    "Use a TikTok video",
+                    "Copy the recipe text and enter it manually",
+                    "Use a different social media platform"
+                ]
+            }
         else:
             print("Processing non-Instagram URL...")
             # Non-Instagram URL - process normally
@@ -355,16 +336,28 @@ async def import_recipe(req: Request):
                 recipe= extract_recipe(cap, srt, speech)
                 print(f"Recipe extraction successful: {recipe.get('title', 'No title')}")
             
-            return {"success": True, "recipe": recipe}
+            return {
+                "success": True,
+                "recipe": recipe,
+                "error": None
+            }
             
     except HTTPException as he:
         print(f"HTTP Exception: {he.status_code} - {he.detail}")
-        raise
+        return {
+            "success": False,
+            "error": he.detail,
+            "recipe": None
+        }
     except Exception as e:
         print(f"Unexpected error: {type(e).__name__}: {str(e)}")
         import traceback
         traceback.print_exc()
-        raise HTTPException(500, f"Internal server error: {str(e)}")
+        return {
+            "success": False,
+            "error": f"Internal server error: {str(e)}",
+            "recipe": None
+        }
 
 @app.post("/generate-step-images")
 async def generate_step_images(req: ImageGenerationRequest):
@@ -409,4 +402,4 @@ async def health():
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
-    uvicorn.run("cookumber:app", host="0.0.0.0", port=port)
+    uvicorn.run("main:app", host="0.0.0.0", port=port) 
