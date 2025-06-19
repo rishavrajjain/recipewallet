@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# build.sh
+# build.sh (Corrected version)
 
 # Exit on error
 set -o errexit
@@ -7,6 +7,7 @@ set -o errexit
 # 1. Install Python dependencies
 pip install -r requirements.txt
 
-# 2. Install ffmpeg
-# Update package lists and install ffmpeg silently
-apt-get update && apt-get install -y ffmpeg
+# 2. Install ffmpeg using sudo for permissions
+echo "Installing ffmpeg..."
+sudo apt-get update && sudo apt-get install -y ffmpeg
+echo "ffmpeg installation complete."
