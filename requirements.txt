@@ -1,7 +1,25 @@
 # requirements.txt - Recipe Extractor API Dependencies
+
+# Core APIs and async server
+fastapi>=0.103.0
+uvicorn[standard]>=0.22.0
+
+# OpenAI clients (sync + async)
 openai>=1.21.0
-fastapi
-uvicorn[standard]
-yt-dlp
-pysrt
-python-dotenv
+
+# YouTube downloader and subtitle handler
+yt-dlp>=2024.3.10
+pysrt>=1.1.2
+
+# Environment variables
+python-dotenv>=1.0.1
+
+# File uploads (for handling multipart/form-data)
+python-multipart>=0.0.9
+aiofiles>=23.2.1  # For async file saving
+
+# Pydantic model parsing
+pydantic>=2.5.3
+
+# Optional: needed for `ffmpeg` post-processing via yt-dlp
+# Make sure `ffmpeg` is installed on your system (not via pip)

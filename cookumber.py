@@ -1,14 +1,16 @@
-# main.py – FastAPI backend (Production-ready for Render)
+# main.py – FastAPI backend (June 2025)
 # Reels → recipe JSON + on-demand GPT-4.1 step-image generation
-# deps: openai>=1.21.0 fastapi uvicorn yt-dlp pysrt python-dotenv
+# User Info → kitchen photos + blood test PDF upload handling
+# deps: openai>=1.21.0 fastapi uvicorn yt-dlp pysrt python-dotenv python-multipart aiofiles
 
 import os, json, time, tempfile, asyncio, base64, uuid
 from pathlib import Path
 from typing import List, Dict
+from contextlib import asynccontextmanager
 
-import yt_dlp, pysrt
+import yt_dlp, pysrt, aiofiles
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, File, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from openai import OpenAI, AsyncOpenAI
@@ -22,31 +24,26 @@ CHAT_MODEL  = "gpt-4.1"
 IMAGE_MODEL = "gpt-image-1"
 MAX_STEPS   = 10
 
-# Get port from environment (Render sets this)
-PORT = int(os.environ.get("PORT", 8000))
+USER_UPLOADS_DIR = Path("/tmp/user_uploads")
 
-# Create images directory
-IMAGES_DIR = Path("/tmp/images")
-IMAGES_DIR.mkdir(exist_ok=True)
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    USER_UPLOADS_DIR.mkdir(exist_ok=True)
+    yield
 
-app = FastAPI()
+app = FastAPI(lifespan=lifespan)
 
-# Updated CORS for production
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # In production, replace with specific domains
-    allow_methods=["*"], 
-    allow_headers=["*"]
+    allow_origins=["*"], allow_methods=["*"], allow_headers=["*"]
 )
 
-# Serve static files from /tmp/images
-app.mount("/images", StaticFiles(directory=str(IMAGES_DIR)), name="images")
+app.mount("/images", StaticFiles(directory="/tmp"), name="images")
 
 class ImageGenerationRequest(BaseModel):
     instructions: List[str]
     recipe_title: str = "Recipe"
 
-# ── YouTube helpers ───────────────────────────────────────────────────
 def run_yt_dlp(url: str, dst: Path) -> dict:
     out = dict(audio=None, subs=None, thumb=None, caption="")
     opts = {
@@ -85,7 +82,6 @@ def transcribe(audio_path: Path) -> str:
     with audio_path.open("rb") as f:
         return client.audio.transcriptions.create(model=model, file=f).text
 
-# ── Recipe extraction ─────────────────────────────────────────────────
 def gpt_json(prompt: str, temp: float) -> dict:
     rsp = client.chat.completions.create(
         model=CHAT_MODEL,
@@ -119,7 +115,6 @@ def extract_recipe(caption: str, srt_text: str, speech: str) -> dict:
         "steps": ["Add steps manually."]
     }
 
-# ── Step parsing (single GPT-4.1 call) ────────────────────────────────
 async def parse_steps_async(steps: List[str]) -> List[Dict[str, str]]:
     joined = "\n".join(f"{i+1}. {s}" for i, s in enumerate(steps))
     prompt = (
@@ -148,7 +143,6 @@ async def parse_steps_async(steps: List[str]) -> List[Dict[str, str]]:
                   "visible_change": "ready"} for _ in steps]
     return items
 
-# ── Image generation ─────────────────────────────────────────────────
 async def generate_step_image(idx: int, comp: Dict[str, str]) -> Dict[str, str]:
     prompt = (
         f"High-resolution food photo, cinematic color grade.\n"
@@ -171,17 +165,18 @@ async def generate_step_image(idx: int, comp: Dict[str, str]) -> Dict[str, str]:
     url = rsp.data[0].url
     if url is None and hasattr(rsp.data[0], "b64_json"):
         image_filename = f"{uuid.uuid4()}.png"
-        fname = IMAGES_DIR / image_filename
+        fname = f"/tmp/{image_filename}"
         with open(fname, "wb") as f:
             f.write(base64.b64decode(rsp.data[0].b64_json))
         
-        # Use request to get the correct host
-        # This will be replaced with actual Render URL
-        url = f"/images/{image_filename}"  # Relative URL for now
+        url = f"http://localhost:8000/images/{image_filename}"
 
     return {"step_number": idx, "image_url": url}
 
-# ── Endpoints ────────────────────────────────────────────────────────
+@app.get("/health")
+async def health():
+    return {"status": "ok", "ts": time.time()}
+
 @app.post("/import-recipe")
 async def import_recipe(req: Request):
     link = (await req.json()).get("link", "").strip()
@@ -225,14 +220,60 @@ async def generate_step_images(req: ImageGenerationRequest):
             "generated_images": good,
             "failed_steps": bad}
 
-@app.get("/health")
-async def health():
-    return {"status": "ok", "ts": time.time()}
+@app.post("/upload-user-info")
+async def upload_user_info(
+    kitchen_photos: List[UploadFile] = File(None, description="List of kitchen photos"),
+    blood_test_pdf: UploadFile = File(None, description="A single blood test report in PDF format")
+):
+    if not kitchen_photos and not blood_test_pdf:
+        raise HTTPException(
+            status_code=400,
+            detail="No files were uploaded. Please provide kitchen photos and/or a blood test PDF."
+        )
 
-@app.get("/")
-async def root():
-    return {"message": "Recipe API is running", "status": "ok"}
+    response_data = {}
+    upload_timestamp = int(time.time())
+
+    if kitchen_photos:
+        kitchen_id = f"kitchen_{uuid.uuid4()}"
+        kitchen_upload_dir = USER_UPLOADS_DIR / kitchen_id
+        kitchen_upload_dir.mkdir(exist_ok=True)
+        
+        for i, photo in enumerate(kitchen_photos):
+            if not photo.content_type or not photo.content_type.startswith("image/"):
+                raise HTTPException(400, f"File '{photo.filename}' is not a valid image.")
+            
+            safe_filename = f"{upload_timestamp}_{i+1}.jpg"
+            file_path = kitchen_upload_dir / safe_filename
+            
+            try:
+                async with aiofiles.open(file_path, "wb") as f:
+                    content = await photo.read()
+                    await f.write(content)
+            except Exception as e:
+                raise HTTPException(500, f"Failed to save photo '{photo.filename}': {e}")
+        
+        response_data["kitchen_id"] = kitchen_id
+
+    if blood_test_pdf:
+        if blood_test_pdf.content_type != "application/pdf":
+            raise HTTPException(400, f"File '{blood_test_pdf.filename}' is not a PDF.")
+            
+        blood_test_id = f"blood_test_{uuid.uuid4()}"
+        safe_filename = f"{upload_timestamp}_{blood_test_pdf.filename or 'report'}.pdf"
+        file_path = USER_UPLOADS_DIR / safe_filename
+        
+        try:
+            async with aiofiles.open(file_path, "wb") as f:
+                content = await blood_test_pdf.read()
+                await f.write(content)
+        except Exception as e:
+            raise HTTPException(500, f"Failed to save PDF '{blood_test_pdf.filename}': {e}")
+        
+        response_data["blood_test_id"] = blood_test_id
+
+    return response_data
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=PORT, reload=False)
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
