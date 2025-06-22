@@ -80,7 +80,8 @@ class Recipe(BaseModel):
 
 class HealthAnalysisRequest(BaseModel):
     recipe: Recipe
-    blood_test_id: str
+    blood_test_id: str = None  # Make optional
+    include_blood_test: bool = False  # Flag to control blood test analysis
 
 class BloodMarker(BaseModel):
     marker: str
@@ -471,6 +472,39 @@ async def debug_request(request: dict):
         "data_types": {key: str(type(value)) for key, value in request.items()}
     }
 
+@app.get("/test-health-response")
+async def test_health_response():
+    """Return a sample health analysis response for Swift testing"""
+    return {
+        "success": True,
+        "analysis": {
+            "overall_score": 75,
+            "risk_level": "low",
+            "personal_message": "Hey! This recipe looks pretty good overall. Just a few minor tweaks and you're golden!",
+            "main_culprits": [
+                {
+                    "ingredient": "salt",
+                    "impact": "High sodium can raise blood pressure",
+                    "severity": "medium"
+                }
+            ],
+            "health_boosters": [
+                {
+                    "ingredient": "vegetables",
+                    "impact": "Great source of vitamins and fiber",
+                    "severity": "high"
+                }
+            ],
+            "recommendations": {
+                "should_avoid": False,
+                "modifications": ["Reduce salt", "Add more vegetables"],
+                "alternative_recipes": ["Healthier version with more veggies"]
+            },
+            "blood_markers_affected": []
+        },
+        "error": None
+    }
+
 @app.post("/import-recipe")
 async def import_recipe(req: Request):
     link = (await req.json()).get("link", "").strip()
@@ -570,24 +604,31 @@ async def upload_user_info(
 
 @app.post("/analyze-health-impact")
 async def analyze_health_impact(request: HealthAnalysisRequest):
-    """Analyze recipe health impact based on user's blood test results"""
+    """Analyze recipe health impact - with or without blood test results"""
     try:
         print(f"Health analysis request received:")
         print(f"Recipe: {request.recipe.name}")
+        print(f"Include blood test: {request.include_blood_test}")
         print(f"Blood test ID: {request.blood_test_id}")
         print(f"Recipe created at: {request.recipe.createdAt}")
         
-        # Validate blood test ID
-        if not request.blood_test_id:
-            raise HTTPException(400, "blood_test_id is required")
-        
-        # Extract blood test data
-        blood_data = extract_blood_test_data(request.blood_test_id)
-        if not blood_data:
-            raise HTTPException(404, f"Blood test data not found for ID: {request.blood_test_id}")
-        
-        # Perform AI-powered health analysis
-        analysis_result = await analyze_recipe_health_impact(request.recipe, blood_data)
+        # Determine analysis type
+        if request.include_blood_test and request.blood_test_id:
+            # Personalized analysis with blood test data
+            print("Performing personalized blood test analysis...")
+            
+            # Extract blood test data
+            blood_data = extract_blood_test_data(request.blood_test_id)
+            if not blood_data:
+                raise HTTPException(404, f"Blood test data not found for ID: {request.blood_test_id}")
+            
+            # Perform AI-powered personalized health analysis
+            analysis_result = await analyze_recipe_health_impact(request.recipe, blood_data)
+            
+        else:
+            # General health analysis without blood test data
+            print("Performing general health analysis...")
+            analysis_result = await analyze_recipe_general_health(request.recipe)
         
         return {
             "success": True,
@@ -600,6 +641,33 @@ async def analyze_health_impact(request: HealthAnalysisRequest):
     except Exception as e:
         print(f"Health analysis error: {e}")
         raise HTTPException(500, f"Failed to analyze health impact: {str(e)}")
+
+@app.get("/check-blood-test/{blood_test_id}")
+async def check_blood_test(blood_test_id: str):
+    """Check if blood test data exists for the given ID"""
+    try:
+        # Check if blood test file exists
+        pdf_files = list(USER_UPLOADS_DIR.glob(f"*{blood_test_id}*.pdf"))
+        if not pdf_files:
+            pdf_files = list(USER_UPLOADS_DIR.glob(f"*blood_test*.pdf"))
+        
+        exists = len(pdf_files) > 0
+        
+        return {
+            "success": True,
+            "blood_test_id": blood_test_id,
+            "exists": exists,
+            "can_do_personalized_analysis": exists
+        }
+        
+    except Exception as e:
+        return {
+            "success": False,
+            "blood_test_id": blood_test_id,
+            "exists": False,
+            "can_do_personalized_analysis": False,
+            "error": str(e)
+        }
 
 @app.get("/blood-test-summary/{blood_test_id}")
 async def get_blood_test_summary(blood_test_id: str):
@@ -795,6 +863,91 @@ Be specific about health impacts and use a casual, friendly tone. Focus on the m
                     "is_out_of_range": blood_data.get('ldl_cholesterol', 0) > 100
                 }
             ]
+        }
+
+async def analyze_recipe_general_health(recipe: Recipe) -> Dict:
+    """Analyze recipe health impact without specific blood test data"""
+    
+    # Create general health analysis prompt
+    prompt = f"""
+Analyze this recipe for general health impact. Respond in JSON format only.
+
+RECIPE:
+Name: {recipe.name}
+Ingredients: {', '.join(recipe.ingredients)}
+Description: {recipe.description}
+
+Return JSON with these exact fields:
+{{
+    "overall_score": <number 0-100, higher = better for general health>,
+    "risk_level": "<low/medium/high>",
+    "personal_message": "<casual, friendly message about general health impacts>",
+    "main_culprits": [
+        {{
+            "ingredient": "<ingredient name>",
+            "impact": "<general health impact>",
+            "severity": "<low/medium/high>"
+        }}
+    ],
+    "health_boosters": [
+        {{
+            "ingredient": "<ingredient name>",
+            "impact": "<positive health benefit>",
+            "severity": "<low/medium/high>"
+        }}
+    ],
+    "recommendations": {{
+        "should_avoid": <true/false>,
+        "modifications": ["<modification 1>", "<modification 2>"],
+        "alternative_recipes": ["<alternative 1>", "<alternative 2>"]
+    }},
+    "blood_markers_affected": []
+}}
+
+Focus on general health impacts like calories, saturated fat, sodium, fiber, vitamins, etc.
+Use a casual, friendly tone. Provide actionable advice for healthier cooking.
+"""
+
+    try:
+        response = await aclient.chat.completions.create(
+            model=CHAT_MODEL,
+            messages=[
+                {"role": "system", "content": "You are a nutrition expert. Return strict JSON only."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.3,
+            response_format={"type": "json_object"}
+        )
+        
+        return json.loads(response.choices[0].message.content)
+    
+    except Exception as e:
+        print(f"General health analysis error: {e}")
+        # Return fallback analysis
+        return {
+            "overall_score": 70,
+            "risk_level": "medium",
+            "personal_message": f"Hey! This {recipe.name} looks tasty! Let me break down the health impacts for you. Overall it's a decent choice with some room for improvement.",
+            "main_culprits": [
+                {
+                    "ingredient": "High sodium ingredients",
+                    "impact": "Could contribute to high blood pressure",
+                    "severity": "medium"
+                }
+            ],
+            "health_boosters": [
+                {
+                    "ingredient": "Vegetables",
+                    "impact": "Great source of vitamins and fiber",
+                    "severity": "low"
+                }
+            ],
+            "recommendations": {
+                "should_avoid": False,
+                "modifications": ["Reduce salt", "Add more vegetables", "Use whole grains"],
+                "alternative_recipes": ["Healthier version with more veggies"]
+            },
+            "blood_markers_affected": []
         }
 
 if __name__ == "__main__":
