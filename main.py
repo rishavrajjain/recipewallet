@@ -34,11 +34,13 @@ BASE_URL = os.getenv("BASE_URL", "http://localhost:8000")
 
 # All temporary files will go here. This is fine for short-term testing.
 USER_UPLOADS_DIR = Path("/tmp/user_uploads")
+# Create the directory immediately to avoid mounting issues
+USER_UPLOADS_DIR.mkdir(exist_ok=True)
 # --- End Configuration ---
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Create the upload directory on startup."""
+    """Ensure the upload directory exists on startup."""
     USER_UPLOADS_DIR.mkdir(exist_ok=True)
     yield
 
