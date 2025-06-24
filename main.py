@@ -18,6 +18,7 @@ from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from openai import OpenAI, AsyncOpenAI
 from pydantic import BaseModel, validator
+import httpx
 
 # --- Configuration ---
 load_dotenv()
@@ -534,14 +535,33 @@ async def import_recipe(req: Request):
     link = (await req.json()).get("link", "").strip()
     if not link:
         raise HTTPException(400, "link is required")
-    with tempfile.TemporaryDirectory() as tmpdir:
-        tmp   = Path(tmpdir)
-        info  = run_yt_dlp(link, tmp)
-        cap   = info["caption"]
-        srt   = srt_to_text(info["subs"]) if info["subs"] else ""
-        speech= transcribe(info["audio"]) if info["audio"] else ""
-        recipe= extract_recipe(cap, srt, speech)
-    return {"success": True, "recipe": recipe}
+
+    try:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp   = Path(tmpdir)
+            info  = run_yt_dlp(link, tmp)
+            cap   = info["caption"]
+            srt   = srt_to_text(info["subs"]) if info["subs"] else ""
+            speech= transcribe(info["audio"]) if info["audio"] else ""
+            recipe= extract_recipe(cap, srt, speech)
+            return {"success": True, "recipe": recipe, "source": "yt_dlp"}
+    except Exception as e:
+        # Fallback: attempt to fetch page HTML and extract description/title
+        try:
+            print(f"yt_dlp failed: {e}. Falling back to basic scrape…")
+            async with httpx.AsyncClient(timeout=15) as client:
+                resp = await client.get(link, headers={"User-Agent": "Mozilla/5.0"})
+                resp.raise_for_status()
+                html = resp.text
+            # Very naive extraction of meta description
+            import re, html as html_lib
+            m = re.search(r'<meta[^>]+property=["\']og:description["\'][^>]+content=["\']([^"\']+)["\']', html, re.IGNORECASE)
+            caption = html_lib.unescape(m.group(1)) if m else "Could not extract description."
+            recipe = extract_recipe(caption, "", "")
+            return {"success": True, "recipe": recipe, "source": "fallback", "warning": "Used fallback extraction; recipe quality may be lower."}
+        except Exception as e2:
+            print(f"Fallback scrape failed: {e2}")
+            raise HTTPException(500, f"Failed to process link: {e}")
 
 @app.post("/generate-step-images")
 async def generate_step_images(req: ImageGenerationRequest):
