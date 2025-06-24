@@ -1,4 +1,4 @@
-# main.py – FastAPI backend (June 2025)
+# main.py – FastAPI backend (Updated for Render Testing)
 # Reels → recipe JSON + on-demand GPT-4.1 step-image generation
 # User Info → kitchen photos + blood test PDF upload handling
 # deps: openai>=1.21.0 fastapi uvicorn yt-dlp pysrt python-dotenv python-multipart aiofiles
@@ -19,18 +19,26 @@ from fastapi.exceptions import RequestValidationError
 from openai import OpenAI, AsyncOpenAI
 from pydantic import BaseModel, validator
 
+# --- Configuration ---
 load_dotenv()
 client  = OpenAI()
 aclient = AsyncOpenAI()
 
 CHAT_MODEL  = "gpt-4.1"
-IMAGE_MODEL = "gpt-image-1"
+IMAGE_MODEL = "gpt-image-1" # Kept your original model name
 MAX_STEPS   = 10
 
+# ★★★ CHANGE 1 of 3: Define Base URL from Environment Variable ★★★
+# This will be your public Render URL.
+BASE_URL = os.getenv("BASE_URL", "http://localhost:8000")
+
+# All temporary files will go here. This is fine for short-term testing.
 USER_UPLOADS_DIR = Path("/tmp/user_uploads")
+# --- End Configuration ---
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    """Create the upload directory on startup."""
     USER_UPLOADS_DIR.mkdir(exist_ok=True)
     yield
 
@@ -49,8 +57,10 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
     print(f"Validation errors: {exc.errors()}")
     return await request_validation_exception_handler(request, exc)
 
-app.mount("/images", StaticFiles(directory="/tmp"), name="images")
+# ★★★ CHANGE 2 of 3: Serve all temp files from a unified directory ★★★
+app.mount("/images", StaticFiles(directory=USER_UPLOADS_DIR), name="images")
 
+# --- Pydantic Models ---
 class ImageGenerationRequest(BaseModel):
     instructions: List[str]
     recipe_title: str = "Recipe"
@@ -133,7 +143,10 @@ class HealthRecommendations(BaseModel):
 class HealthAnalysisResponse(BaseModel):
     success: bool
     analysis: Dict = {}
+# --- End Pydantic Models ---
 
+
+# --- Core Logic Functions ---
 def run_yt_dlp(url: str, dst: Path) -> dict:
     out = dict(audio=None, subs=None, thumb=None, caption="")
     opts = {
@@ -249,17 +262,24 @@ async def generate_step_image(idx: int, comp: Dict[str, str]) -> Dict[str, str]:
         model=IMAGE_MODEL,
         prompt=prompt,
         size="1024x1024",
-        n=1
+        n=1,
+        response_format="b64_json"  # Request b64_json to handle the file ourselves
     )
+    
+    # We expect b64_json, not a temporary URL from OpenAI
+    if not rsp.data[0].b64_json:
+        raise ValueError("Image generation failed, no b64_json data returned.")
 
-    url = rsp.data[0].url
-    if url is None and hasattr(rsp.data[0], "b64_json"):
-        image_filename = f"{uuid.uuid4()}.png"
-        fname = f"/tmp/{image_filename}"
-        with open(fname, "wb") as f:
-            f.write(base64.b64decode(rsp.data[0].b64_json))
-        
-        url = f"http://localhost:8000/images/{image_filename}"
+    image_filename = f"{uuid.uuid4()}.png"
+    # Save to the directory we are serving via StaticFiles
+    fname = USER_UPLOADS_DIR / image_filename
+    
+    # Use async file writing
+    async with aiofiles.open(fname, "wb") as f:
+        await f.write(base64.b64decode(rsp.data[0].b64_json))
+    
+    # ★★★ CHANGE 3 of 3: Use the public BASE_URL for the image link ★★★
+    url = f"{BASE_URL}/images/{image_filename}"
 
     return {"step_number": idx, "image_url": url}
 
@@ -457,6 +477,8 @@ Be specific about the user's actual blood values and give personalized advice. U
             ]
         }
 
+
+# --- API Endpoints ---
 @app.get("/health")
 async def health():
     return {"status": "ok", "ts": time.time()}
@@ -952,4 +974,6 @@ Use a casual, friendly tone. Provide actionable advice for healthier cooking.
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+    # Render uses the PORT environment variable to route traffic.
+    port = int(os.getenv("PORT", 8000))
+    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=True)
