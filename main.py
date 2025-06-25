@@ -3,7 +3,7 @@
 # User Info → kitchen photos + blood test PDF upload handling
 # deps: openai>=1.21.0 fastapi uvicorn yt-dlp pysrt python-dotenv python-multipart aiofiles
 
-import os, json, time, tempfile, asyncio, base64, uuid
+import os, json, time, tempfile, asyncio, base64, uuid, random
 from pathlib import Path
 from typing import List, Dict, Union
 from contextlib import asynccontextmanager
@@ -28,7 +28,7 @@ aclient = AsyncOpenAI()
 SPOONACULAR_API_KEY = os.getenv("SPOONACULAR_API_KEY", "")
 
 CHAT_MODEL  = "gpt-4.1"
-IMAGE_MODEL = "dall-e-3"
+IMAGE_MODEL = "gpt-image-1"
 MAX_STEPS   = 10
 
 BASE_URL = os.getenv("BASE_URL", "http://localhost:8000")
@@ -72,19 +72,11 @@ class Recipe(BaseModel):
     name: str
     description: str
     imageUrl: str
-    ingredients: List[IngredientItem]
+    ingredients: List[str]
     cookTime: int
     isFromReel: bool
     steps: List[str]
     createdAt: Union[str, datetime]
-
-    # Autogenerate IngredientItem objects if we receive simple strings
-    @validator('ingredients', pre=True)
-    def convert_ingredients(cls, v):
-        if isinstance(v, list) and v and isinstance(v[0], str):
-            # The rewritten ingredient_image_url function is called here
-            return [{"name": ing.strip(), "imageUrl": ingredient_image_url(ing)} for ing in v]
-        return v
 
     @validator('createdAt', pre=True)
     def parse_created_at(cls, v):
@@ -257,14 +249,28 @@ async def parse_steps_async(steps: List[str]) -> List[Dict[str, str]]:
     return items
 
 async def generate_step_image(idx: int, comp: Dict[str, str]) -> Dict[str, str]:
+    # --- Dynamic prompt generation with varied props for realism & wow-factor ---
+    prop_choices = [
+        "wooden spoon and vintage measuring cups",
+        "ceramic ramekin of chopped fresh herbs",
+        "small glass bowl of colorful spices",
+        "tiny jug of extra-virgin olive oil",
+        "marble mortar and pestle with crushed pepper",
+        "sprig of fresh rosemary on the side",
+        "chef\'s knife with patina finish",
+        "linen napkin and copper spoon",
+        "cast-iron skillet handle peeking in",
+    ]
+    chosen_props = random.choice(prop_choices)
+
     prompt = (
-        f"High-resolution food photo, cinematic color grade.\n"
-        f"Scene: Step {idx}. {comp['verb']} {comp['mainIngredient']} "
-        f"in {comp['vessel']}; {comp['visible_change']}.\n"
-        "Camera: 50 mm prime, f/2.8, ISO 200, 1/125 s. "
+        f"High-resolution food photography, cinematic color grade.\n"
+        f"Scene: Step {idx}. {comp['verb'].capitalize()} {comp['mainIngredient']} "
+        f"in {comp['vessel']}; showing {comp['visible_change']}.\n"
+        "Camera: 50 mm prime lens, f/2.8, ISO 200, 1/125 s. "
         "Angle: top-down 90°. Surface: rustic dark-oak board. "
-        "Props: neutral linen napkin, pinch bowl sea salt. "
-        "Lighting: soft window light from left, natural shadows. "
+        f"Props: {chosen_props}. "
+        "Lighting: soft window light from left, gentle natural shadows. "
         "Aspect: 1:1. Negative: hands, faces, brand logos, text."
     )
 
@@ -338,7 +344,7 @@ BLOOD TEST RESULTS:
 
 RECIPE ANALYSIS:
 Title: {recipe_data['title']}
-Ingredients: {', '.join([ (i['name'] if isinstance(i, dict) else str(getattr(i, 'name', i))) for i in recipe_data['ingredients'] ])}
+Ingredients: {', '.join([str(i) for i in recipe_data['ingredients']])}
 
 Analyze and return JSON with:
 {{
@@ -360,10 +366,6 @@ Analyze and return JSON with:
     except Exception as e:
         print(f"Health analysis error: {e}")
         return { "overall_score": 45, "risk_level": "medium", "personal_message": "Could not complete AI analysis." }
-
-def enrich_ingredients(ing_list):
-    """Return list of dicts with name + imageUrl."""
-    return [{"name": i.strip(), "imageUrl": ingredient_image_url(i)} for i in ing_list]
 
 # --- API Endpoints ---
 @app.get("/health")
@@ -392,8 +394,6 @@ async def import_recipe(req: Request):
             srt = srt_to_text(info["subs"]) if info["subs"] else ""
             speech = transcribe(info["audio"]) if info["audio"] else ""
             recipe = extract_recipe(cap, srt, speech)
-            if isinstance(recipe.get("ingredients"), list) and recipe["ingredients"] and isinstance(recipe["ingredients"][0], str):
-                recipe["ingredients"] = enrich_ingredients(recipe["ingredients"])
             return {"success": True, "recipe": recipe, "source": "yt_dlp"}
     except Exception as e:
         try:
@@ -406,8 +406,6 @@ async def import_recipe(req: Request):
             m = re.search(r'<meta[^>]+property=["\']og:description["\'][^>]+content=["\']([^"\']+)["\']', html, re.IGNORECASE)
             caption = html_lib.unescape(m.group(1)) if m else "Could not extract description."
             recipe = extract_recipe(caption, "", "")
-            if isinstance(recipe.get("ingredients"), list) and recipe["ingredients"] and isinstance(recipe["ingredients"][0], str):
-                recipe["ingredients"] = enrich_ingredients(recipe["ingredients"])
             return {"success": True, "recipe": recipe, "source": "fallback", "warning": "Used fallback extraction."}
         except Exception as e2:
             print(f"Fallback scrape failed: {e2}")
@@ -517,10 +515,16 @@ async def analyze_recipe_health_impact(recipe: Recipe, blood_data: Dict) -> Dict
     if blood_data.get("ldl_cholesterol"): blood_summary.append(f"LDL Cholesterol: {blood_data['ldl_cholesterol']} mg/dL ({'HIGH' if blood_data['ldl_cholesterol'] > 100 else 'NORMAL'})")
     if blood_data.get("glucose_fasting"): blood_summary.append(f"Fasting Glucose: {blood_data['glucose_fasting']} mg/dL ({'HIGH' if blood_data['glucose_fasting'] > 100 else 'NORMAL'})")
     blood_context = "\n".join(blood_summary)
+
+    ingredients_list = [
+        i if isinstance(i, str) else i.get('name', str(i))
+        for i in recipe.ingredients
+    ]
+
     prompt = f"""
 Analyze this recipe for someone with these blood test results. Respond in JSON.
 BLOOD TEST RESULTS: {blood_context}
-RECIPE: Name: {recipe.name}, Ingredients: {', '.join([i['name'] for i in recipe.ingredients])}
+RECIPE: Name: {recipe.name}, Ingredients: {', '.join(ingredients_list)}
 Return JSON: {{ "overall_score": <0-100>, "risk_level": "<low/medium/high>", "personal_message": "<...>", "main_culprits": [{{...}}], "health_boosters": [{{...}}], "recommendations": {{...}}, "blood_markers_affected": [{{...}}] }}
 """
     try:
@@ -531,9 +535,14 @@ Return JSON: {{ "overall_score": <0-100>, "risk_level": "<low/medium/high>", "pe
         return {"overall_score": 50, "risk_level": "medium", "personal_message": "Could not complete analysis."}
 
 async def analyze_recipe_general_health(recipe: Recipe) -> Dict:
+    ingredients_list = [
+        i if isinstance(i, str) else i.get('name', str(i))
+        for i in recipe.ingredients
+    ]
+
     prompt = f"""
 Analyze this recipe for general health. Respond in JSON.
-RECIPE: Name: {recipe.name}, Ingredients: {', '.join([i['name'] for i in recipe.ingredients])}
+RECIPE: Name: {recipe.name}, Ingredients: {', '.join(ingredients_list)}
 Return JSON: {{ "overall_score": <0-100>, "risk_level": "<low/medium/high>", "personal_message": "<...>", "main_culprits": [{{...}}], "health_boosters": [{{...}}], "recommendations": {{...}}, "blood_markers_affected": [] }}
 """
     try:
