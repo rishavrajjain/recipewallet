@@ -154,31 +154,78 @@ class HealthAnalysisResponse(BaseModel):
 def run_yt_dlp(url: str, dst: Path) -> dict:
     """Universal video downloader. Works for YouTube, Instagram, TikTok, etc."""
     out = dict(audio=None, subs=None, thumb=None, caption="", thumbnail_url="")
-    opts = {
-        "format": "bestaudio/best",
-        "outtmpl": str(dst / "%(id)s.%(ext)s"),
-        "writesubtitles": True,
-        "writeautomaticsub": True,
-        "subtitleslangs": ["en", "hi", ""],
-        "subtitlesformat": "srt",
-        "writethumbnail": True,
-        "postprocessors": [{
-            "key": "FFmpegExtractAudio",
-            "preferredcodec": "mp3",
-            "preferredquality": "192"
-        }],
-        "quiet": True, "no_warnings": True
-    }
-    with yt_dlp.YoutubeDL(opts) as ydl:
-        info = ydl.extract_info(url, download=True)
-
-    base = dst / info["id"]
-    out["audio"]   = next(base.parent.glob(f"{info['id']}.mp3"), None)
-    out["subs"]    = next(base.parent.glob(f"{info['id']}*.srt"), None)
-    out["thumb"]   = next(base.parent.glob(f"{info['id']}.jpg"), None) or next(base.parent.glob(f"{info['id']}.webp"), None)
-    out["caption"] = (info.get("description") or info.get("title") or "").strip()
-    out["thumbnail_url"] = info.get("thumbnail", "")
-    return out
+    
+    # Multiple extraction strategies for production robustness
+    strategies = [
+        # Strategy 1: Standard extraction
+        {
+            "format": "bestaudio/best",
+            "writesubtitles": True,
+            "writeautomaticsub": True,
+            "subtitleslangs": ["en", "hi", ""],
+            "subtitlesformat": "srt",
+            "writethumbnail": True,
+            "postprocessors": [{
+                "key": "FFmpegExtractAudio",
+                "preferredcodec": "mp3",
+                "preferredquality": "192"
+            }],
+            "quiet": True, "no_warnings": True
+        },
+        # Strategy 2: Simplified extraction (no audio processing)
+        {
+            "format": "best",
+            "writesubtitles": True,
+            "writeautomaticsub": True,
+            "subtitleslangs": ["en"],
+            "writethumbnail": True,
+            "skip_download": False,
+            "quiet": True, "no_warnings": True
+        },
+        # Strategy 3: Info only (no downloads)
+        {
+            "skip_download": True,
+            "writesubtitles": False,
+            "writethumbnail": False,
+            "quiet": True, "no_warnings": True
+        }
+    ]
+    
+    for i, opts in enumerate(strategies, 1):
+        try:
+            print(f"🎬 DEBUG: Trying yt-dlp strategy {i}/3")
+            opts["outtmpl"] = str(dst / "%(id)s.%(ext)s")
+            
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(url, download=not opts.get("skip_download", False))
+            
+            if not info:
+                print(f"⚠️ DEBUG: Strategy {i} returned no info")
+                continue
+                
+            print(f"✅ DEBUG: Strategy {i} succeeded, got video info")
+            
+            # Extract files if downloaded
+            if not opts.get("skip_download", False):
+                base = dst / info["id"]
+                out["audio"] = next(base.parent.glob(f"{info['id']}.mp3"), None)
+                out["subs"] = next(base.parent.glob(f"{info['id']}*.srt"), None)
+                out["thumb"] = next(base.parent.glob(f"{info['id']}.jpg"), None) or next(base.parent.glob(f"{info['id']}.webp"), None)
+            
+            # Extract metadata (always available)
+            out["caption"] = (info.get("description") or info.get("title") or "").strip()
+            out["thumbnail_url"] = info.get("thumbnail", "")
+            
+            print(f"🎬 DEBUG: Extracted - Caption: {len(out['caption'])} chars, Thumbnail: {'✅' if out['thumbnail_url'] else '❌'}")
+            return out
+            
+        except Exception as e:
+            print(f"⚠️ DEBUG: Strategy {i} failed: {str(e)}")
+            if i == len(strategies):  # Last strategy failed
+                raise e
+            continue
+    
+    raise Exception("All yt-dlp strategies failed")
 
 def srt_to_text(path: Path) -> str:
     return " ".join(
@@ -205,22 +252,48 @@ def gpt_json(prompt: str, temp: float) -> dict:
     return json.loads(rsp.choices[0].message.content)
 
 def extract_recipe(caption: str, srt_text: str, speech: str, thumbnail_url: str = "") -> dict:
+    # Combine all available text
+    all_text = f"{caption}\n{srt_text}\n{speech}".strip()
+    
+    if not all_text or len(all_text) < 10:
+        print(f"⚠️ DEBUG: Insufficient text for recipe extraction: {len(all_text)} chars")
+        return {}
+    
+    print(f"🤖 DEBUG: Sending to GPT - Total text: {len(all_text)} chars")
+    
     prompt = (
-        "Build one recipe from the text. Return JSON keys: title, description (1 sentence), "
+        "Extract a recipe from the following content. Return JSON with keys: title, description (1 sentence), "
         "ingredients (list of strings), steps (list of strings).\n\n"
-        f"POST_CAPTION:\n{caption}\n\nCLOSED_CAPTIONS:\n{srt_text}\n\n"
-        f"SPEECH_TRANSCRIPT_OR_PAGE_TEXT:\n{speech}"
+        "If the content doesn't contain a clear recipe, try to infer one from cooking-related content.\n\n"
+        f"CONTENT:\n{all_text[:10000]}"  # Limit to 10k chars to avoid token limits
     )
-    for t in (0.1, 0.5):
+    
+    # Try multiple temperatures for better success rate
+    for t in (0.1, 0.3, 0.5):
         try:
+            print(f"🤖 DEBUG: Trying GPT with temperature {t}")
             data = gpt_json(prompt, t)
-            if data.get("ingredients") and data.get("steps"):
-                data["thumbnailUrl"] = thumbnail_url
-                # Add default cookTime, will be overwritten if found by other methods
-                data.setdefault("cookTime", 0) 
-                return data
-        except Exception:
+            
+            if data and isinstance(data, dict):
+                # Validate required fields
+                ingredients = data.get("ingredients", [])
+                steps = data.get("steps", [])
+                
+                if ingredients and steps and len(ingredients) > 0 and len(steps) > 0:
+                    data["thumbnailUrl"] = thumbnail_url
+                    data.setdefault("cookTime", 0)
+                    print(f"✅ DEBUG: GPT extraction successful - {len(ingredients)} ingredients, {len(steps)} steps")
+                    return data
+                else:
+                    print(f"⚠️ DEBUG: GPT returned incomplete recipe - ingredients: {len(ingredients)}, steps: {len(steps)}")
+            else:
+                print(f"⚠️ DEBUG: GPT returned invalid data type: {type(data)}")
+                
+        except Exception as e:
+            print(f"❌ DEBUG: GPT extraction failed at temp {t}: {str(e)}")
             continue
+    
+    print(f"💥 DEBUG: All GPT extraction attempts failed")
     return {} # Return empty dict on failure
 
 async def extract_recipe_from_spoonacular(url: str, client: httpx.AsyncClient) -> dict:
@@ -455,48 +528,101 @@ async def import_recipe(req: Request):
     if not link:
         raise HTTPException(400, "link is required")
 
+    print(f"🔍 DEBUG: Starting import for link: {link}")
     recipe_data = {}
     source = "unknown"
+    debug_info = {"attempts": [], "errors": []}
 
     # --- Strategy 1: yt-dlp for video sites (YouTube, Instagram, TikTok) ---
     try:
+        print(f"🎬 DEBUG: Attempting yt-dlp extraction for: {link}")
         with tempfile.TemporaryDirectory() as tmpdir:
             info = run_yt_dlp(link, Path(tmpdir))
             cap, srt, speech, thumb = info["caption"], "", "", info["thumbnail_url"]
-            if info["subs"]: srt = srt_to_text(info["subs"])
-            if info["audio"]: speech = transcribe(info["audio"])
+            print(f"🎬 DEBUG: yt-dlp extracted - Caption: {len(cap)} chars, Thumbnail: {thumb[:50] if thumb else 'None'}")
+            
+            if info["subs"]: 
+                srt = srt_to_text(info["subs"])
+                print(f"🎬 DEBUG: Subtitles extracted: {len(srt)} chars")
+            if info["audio"]: 
+                speech = transcribe(info["audio"])
+                print(f"🎬 DEBUG: Audio transcribed: {len(speech)} chars")
             
             if cap or srt or speech:
                 recipe_data = extract_recipe(cap, srt, speech, thumb)
-                if recipe_data: source = "video_extractor"
+                if recipe_data and recipe_data.get("steps") and recipe_data.get("ingredients"):
+                    source = "video_extractor"
+                    print(f"✅ DEBUG: Video extraction successful! Found {len(recipe_data.get('ingredients', []))} ingredients, {len(recipe_data.get('steps', []))} steps")
+                else:
+                    print(f"⚠️ DEBUG: Video extraction returned incomplete data: {recipe_data}")
+                    debug_info["attempts"].append("yt-dlp: extracted data but missing ingredients/steps")
+            else:
+                print(f"⚠️ DEBUG: No usable content extracted from video")
+                debug_info["attempts"].append("yt-dlp: no caption, subtitles, or audio")
     except Exception as e:
-        print(f"INFO: yt-dlp failed for '{link}'. Moving to website extractors. Error: {e}")
+        error_msg = f"yt-dlp failed: {str(e)}"
+        print(f"❌ DEBUG: {error_msg}")
+        debug_info["errors"].append(error_msg)
 
     # --- Fallback to Website Extraction if Video Extraction Fails ---
-    if not recipe_data:
+    if not recipe_data or not recipe_data.get("steps") or not recipe_data.get("ingredients"):
+        print(f"🌐 DEBUG: Attempting website extraction fallbacks...")
         async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
             
             # --- Strategy 2: Spoonacular API (high-quality) ---
-            recipe_data = await extract_recipe_from_spoonacular(link, client)
-            if recipe_data:
-                source = "spoonacular_api"
-            else:
-                # --- Strategy 3: Local HTML Scraping (JSON-LD or raw text) ---
+            try:
+                print(f"🥄 DEBUG: Trying Spoonacular API...")
+                recipe_data = await extract_recipe_from_spoonacular(link, client)
+                if recipe_data and recipe_data.get("steps") and recipe_data.get("ingredients"):
+                    source = "spoonacular_api"
+                    print(f"✅ DEBUG: Spoonacular extraction successful!")
+                else:
+                    print(f"⚠️ DEBUG: Spoonacular returned incomplete data or None")
+                    debug_info["attempts"].append("spoonacular: no data or incomplete")
+            except Exception as e:
+                error_msg = f"Spoonacular failed: {str(e)}"
+                print(f"❌ DEBUG: {error_msg}")
+                debug_info["errors"].append(error_msg)
+            
+            # --- Strategy 3: Local HTML Scraping (JSON-LD or raw text) ---
+            if not recipe_data or not recipe_data.get("steps") or not recipe_data.get("ingredients"):
                 try:
+                    print(f"🌐 DEBUG: Trying HTML scraping...")
                     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"}
                     resp = await client.get(link, headers=headers)
                     resp.raise_for_status()
+                    print(f"🌐 DEBUG: HTML fetched, {len(resp.text)} chars")
                     recipe_data = extract_recipe_from_html(resp.text)
-                    if recipe_data: source = "website_scrape"
+                    if recipe_data and recipe_data.get("steps") and recipe_data.get("ingredients"):
+                        source = "website_scrape"
+                        print(f"✅ DEBUG: HTML scraping successful!")
+                    else:
+                        print(f"⚠️ DEBUG: HTML scraping returned incomplete data: {recipe_data}")
+                        debug_info["attempts"].append("html_scrape: no data or incomplete")
                 except Exception as e2:
-                    print(f"ERROR: Final website scrape method failed for '{link}'. Error: {e2}")
+                    error_msg = f"HTML scraping failed: {str(e2)}"
+                    print(f"❌ DEBUG: {error_msg}")
+                    debug_info["errors"].append(error_msg)
 
     # --- Final check and response ---
     if recipe_data and recipe_data.get("steps") and recipe_data.get("ingredients"):
+        print(f"🎉 DEBUG: SUCCESS! Returning recipe from {source}")
         return {"success": True, "recipe": recipe_data, "source": source}
     else:
-        print(f"ERROR: Could not extract recipe from link: {link}")
-        raise HTTPException(500, detail="Failed to extract a valid recipe from the provided link. The content may not be a recipe or the website is not supported.")
+        print(f"💥 DEBUG: FINAL FAILURE - All extraction methods failed")
+        print(f"💥 DEBUG: Attempts made: {debug_info['attempts']}")
+        print(f"💥 DEBUG: Errors encountered: {debug_info['errors']}")
+        print(f"💥 DEBUG: Final recipe_data: {recipe_data}")
+        
+        # Return more detailed error info for debugging
+        error_detail = {
+            "message": "Failed to extract a valid recipe from the provided link.",
+            "link": link,
+            "attempts": debug_info["attempts"],
+            "errors": debug_info["errors"],
+            "partial_data": recipe_data if recipe_data else None
+        }
+        raise HTTPException(500, detail=error_detail)
 
 @app.post("/generate-step-images")
 async def generate_step_images(req: ImageGenerationRequest):
