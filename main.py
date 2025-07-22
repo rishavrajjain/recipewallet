@@ -3,7 +3,7 @@
 # User Info → kitchen photos + blood test PDF upload handling
 # deps: openai>=1.21.0 fastapi uvicorn yt-dlp pysrt python-dotenv python-multipart aiofiles beautifulsoup4 lxml
 
-import os, json, time, tempfile, asyncio, base64, uuid, random
+import os, json, time, tempfile, asyncio, base64, uuid, random, html
 from pathlib import Path
 from typing import List, Dict, Union
 from contextlib import asynccontextmanager
@@ -152,12 +152,12 @@ class HealthAnalysisResponse(BaseModel):
 
 # --- Core Logic Functions ---
 def run_yt_dlp(url: str, dst: Path) -> dict:
-    """Universal video downloader. Works for YouTube, Instagram, TikTok, etc."""
+    """Universal video downloader with Instagram-specific workarounds."""
     out = dict(audio=None, subs=None, thumb=None, caption="", thumbnail_url="")
     
-    # Multiple extraction strategies for production robustness
-    strategies = [
-        # Strategy 1: Standard extraction
+    # Instagram-specific strategies to bypass rate limiting
+    instagram_strategies = [
+        # Strategy 1: Use different user agents and headers
         {
             "format": "bestaudio/best",
             "writesubtitles": True,
@@ -165,6 +165,13 @@ def run_yt_dlp(url: str, dst: Path) -> dict:
             "subtitleslangs": ["en", "hi", ""],
             "subtitlesformat": "srt",
             "writethumbnail": True,
+            "http_headers": {
+                "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 15_0 like Mac OS X) AppleWebKit/605.1.15",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.5",
+                "Accept-Encoding": "gzip, deflate",
+                "Connection": "keep-alive",
+            },
             "postprocessors": [{
                 "key": "FFmpegExtractAudio",
                 "preferredcodec": "mp3",
@@ -172,28 +179,45 @@ def run_yt_dlp(url: str, dst: Path) -> dict:
             }],
             "quiet": True, "no_warnings": True
         },
-        # Strategy 2: Simplified extraction (no audio processing)
+        # Strategy 2: Mobile user agent, no audio processing
         {
             "format": "best",
             "writesubtitles": True,
-            "writeautomaticsub": True,
-            "subtitleslangs": ["en"],
             "writethumbnail": True,
-            "skip_download": False,
+            "http_headers": {
+                "User-Agent": "Instagram 219.0.0.12.117 Android",
+            },
             "quiet": True, "no_warnings": True
         },
-        # Strategy 3: Info only (no downloads)
+        # Strategy 3: Minimal extraction with different extractor
+        {
+            "format": "worst",
+            "writesubtitles": False,
+            "writethumbnail": True,
+            "http_headers": {
+                "User-Agent": "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
+            },
+            "quiet": True, "no_warnings": True
+        },
+        # Strategy 4: Info only (metadata extraction)
         {
             "skip_download": True,
             "writesubtitles": False,
             "writethumbnail": False,
+            "http_headers": {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            },
             "quiet": True, "no_warnings": True
         }
     ]
     
+    # Use Instagram strategies if it's an Instagram URL
+    is_instagram = "instagram.com" in url.lower()
+    strategies = instagram_strategies if is_instagram else [instagram_strategies[0]]  # Use first strategy for non-Instagram
+    
     for i, opts in enumerate(strategies, 1):
         try:
-            print(f"🎬 DEBUG: Trying yt-dlp strategy {i}/3")
+            print(f"🎬 DEBUG: Trying {'Instagram' if is_instagram else 'video'} strategy {i}/{len(strategies)}")
             opts["outtmpl"] = str(dst / "%(id)s.%(ext)s")
             
             with yt_dlp.YoutubeDL(opts) as ydl:
@@ -296,8 +320,63 @@ def extract_recipe(caption: str, srt_text: str, speech: str, thumbnail_url: str 
     print(f"💥 DEBUG: All GPT extraction attempts failed")
     return {} # Return empty dict on failure
 
+async def extract_instagram_fallback(url: str, client: httpx.AsyncClient) -> dict:
+    """Fallback Instagram extraction when yt-dlp fails."""
+    try:
+        print(f"📱 DEBUG: Attempting Instagram fallback extraction")
+        
+        # Try multiple user agents
+        user_agents = [
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 15_0 like Mac OS X) AppleWebKit/605.1.15",
+            "Mozilla/5.0 (Linux; Android 10; SM-G975F) AppleWebKit/537.36",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        ]
+        
+        for ua in user_agents:
+            try:
+                headers = {
+                    "User-Agent": ua,
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                    "Accept-Language": "en-US,en;q=0.5",
+                    "Accept-Encoding": "gzip, deflate",
+                    "Connection": "keep-alive",
+                    "Upgrade-Insecure-Requests": "1",
+                }
+                
+                response = await client.get(url, headers=headers, timeout=15, follow_redirects=True)
+                if response.status_code == 200:
+                    html = response.text
+                    
+                    # Extract basic metadata from HTML
+                    title_match = re.search(r'<title[^>]*>([^<]+)</title>', html, re.IGNORECASE)
+                    description_match = re.search(r'<meta[^>]+property=["\']og:description["\'][^>]+content=["\']([^"\']+)["\']', html, re.IGNORECASE)
+                    image_match = re.search(r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']', html, re.IGNORECASE)
+                    
+                    title = html.unescape(title_match.group(1)) if title_match else "Instagram Recipe"
+                    description = html.unescape(description_match.group(1)) if description_match else ""
+                    thumbnail = html.unescape(image_match.group(1)) if image_match else ""
+                    
+                    if description and len(description) > 20:
+                        print(f"📱 DEBUG: Instagram fallback found content: {len(description)} chars")
+                        # Use GPT to extract recipe from the description
+                        return extract_recipe("", "", description, thumbnail)
+                    
+            except Exception as e:
+                print(f"📱 DEBUG: Instagram fallback attempt failed with {ua[:20]}...: {str(e)}")
+                continue
+        
+        return {}
+    except Exception as e:
+        print(f"📱 DEBUG: Instagram fallback completely failed: {str(e)}")
+        return {}
+
 async def extract_recipe_from_spoonacular(url: str, client: httpx.AsyncClient) -> dict:
     """Extracts a recipe using the Spoonacular API."""
+    # Skip Spoonacular for Instagram URLs (it doesn't work)
+    if "instagram.com" in url.lower():
+        print(f"🥄 DEBUG: Skipping Spoonacular for Instagram URL")
+        return None
+        
     if not SPOONACULAR_API_KEY or SPOONACULAR_API_KEY == "YOUR_API_KEY_HERE":
         return None
     api_url = "https://api.spoonacular.com/recipes/extract"
@@ -569,22 +648,39 @@ async def import_recipe(req: Request):
         print(f"🌐 DEBUG: Attempting website extraction fallbacks...")
         async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
             
-            # --- Strategy 2: Spoonacular API (high-quality) ---
-            try:
-                print(f"🥄 DEBUG: Trying Spoonacular API...")
-                recipe_data = await extract_recipe_from_spoonacular(link, client)
-                if recipe_data and recipe_data.get("steps") and recipe_data.get("ingredients"):
-                    source = "spoonacular_api"
-                    print(f"✅ DEBUG: Spoonacular extraction successful!")
-                else:
-                    print(f"⚠️ DEBUG: Spoonacular returned incomplete data or None")
-                    debug_info["attempts"].append("spoonacular: no data or incomplete")
-            except Exception as e:
-                error_msg = f"Spoonacular failed: {str(e)}"
-                print(f"❌ DEBUG: {error_msg}")
-                debug_info["errors"].append(error_msg)
+            # --- Strategy 2: Instagram Fallback (for Instagram URLs when yt-dlp fails) ---
+            if "instagram.com" in link.lower():
+                try:
+                    print(f"📱 DEBUG: Trying Instagram fallback extraction...")
+                    recipe_data = await extract_instagram_fallback(link, client)
+                    if recipe_data and recipe_data.get("steps") and recipe_data.get("ingredients"):
+                        source = "instagram_fallback"
+                        print(f"✅ DEBUG: Instagram fallback extraction successful!")
+                    else:
+                        print(f"⚠️ DEBUG: Instagram fallback returned incomplete data")
+                        debug_info["attempts"].append("instagram_fallback: no data or incomplete")
+                except Exception as e:
+                    error_msg = f"Instagram fallback failed: {str(e)}"
+                    print(f"❌ DEBUG: {error_msg}")
+                    debug_info["errors"].append(error_msg)
             
-            # --- Strategy 3: Local HTML Scraping (JSON-LD or raw text) ---
+            # --- Strategy 3: Spoonacular API (for recipe websites) ---
+            if not recipe_data or not recipe_data.get("steps") or not recipe_data.get("ingredients"):
+                try:
+                    print(f"🥄 DEBUG: Trying Spoonacular API...")
+                    recipe_data = await extract_recipe_from_spoonacular(link, client)
+                    if recipe_data and recipe_data.get("steps") and recipe_data.get("ingredients"):
+                        source = "spoonacular_api"
+                        print(f"✅ DEBUG: Spoonacular extraction successful!")
+                    else:
+                        print(f"⚠️ DEBUG: Spoonacular returned incomplete data or None")
+                        debug_info["attempts"].append("spoonacular: no data or incomplete")
+                except Exception as e:
+                    error_msg = f"Spoonacular failed: {str(e)}"
+                    print(f"❌ DEBUG: {error_msg}")
+                    debug_info["errors"].append(error_msg)
+            
+            # --- Strategy 4: Local HTML Scraping (JSON-LD or raw text) ---
             if not recipe_data or not recipe_data.get("steps") or not recipe_data.get("ingredients"):
                 try:
                     print(f"🌐 DEBUG: Trying HTML scraping...")
