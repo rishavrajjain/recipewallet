@@ -1,5 +1,5 @@
 # main.py – FastAPI backend (Updated for Render Testing)
-# Reels → recipe JSON + on-demand GPT-4.1 step-image generation
+# Instagram Reels & TikTok → recipe JSON + on-demand GPT-4.1 step-image generation
 # User Info → kitchen photos + blood test PDF upload handling
 # deps: openai>=1.21.0 fastapi uvicorn yt-dlp pysrt python-dotenv python-multipart aiofiles
 
@@ -153,6 +153,20 @@ def run_yt_dlp(url: str, dst: Path) -> dict:
         }],
         "quiet": True, "no_warnings": True
     }
+    
+    # Add platform-specific headers for better success rates
+    if "tiktok.com" in url.lower():
+        opts["http_headers"] = {
+            "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 15_0 like Mac OS X) AppleWebKit/605.1.15",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.5",
+        }
+    elif "instagram.com" in url.lower():
+        opts["http_headers"] = {
+            "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 15_0 like Mac OS X) AppleWebKit/605.1.15",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.5",
+        }
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(url, download=True)
 
