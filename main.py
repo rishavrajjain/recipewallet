@@ -150,7 +150,7 @@ class HealthAnalysisResponse(BaseModel):
 
 # --- Core Logic Functions ---
 def run_yt_dlp(url: str, dst: Path) -> dict:
-    out = dict(audio=None, subs=None, thumb=None, caption="")
+    out = dict(audio=None, subs=None, thumb=None, caption="", thumbnail_url="")
     opts = {
         "format": "bestaudio/best",
         "outtmpl": str(dst / "%(id)s.%(ext)s"),
@@ -158,6 +158,7 @@ def run_yt_dlp(url: str, dst: Path) -> dict:
         "writeautomaticsub": True,
         "subtitleslangs": ["en", "hi", ""],
         "subtitlesformat": "srt",
+        "writethumbnail": True,  # Enable thumbnail download
         "postprocessors": [{
             "key": "FFmpegExtractAudio",
             "preferredcodec": "mp3",
@@ -171,8 +172,12 @@ def run_yt_dlp(url: str, dst: Path) -> dict:
     base = dst / info["id"]
     out["audio"]   = next(base.parent.glob(f"{info['id']}.mp3"), None)
     out["subs"]    = next(base.parent.glob(f"{info['id']}*.srt"), None)
-    out["thumb"]   = next(base.parent.glob(f"{info['id']}.jpg"), None)
+    out["thumb"]   = next(base.parent.glob(f"{info['id']}.jpg"), None) or next(base.parent.glob(f"{info['id']}.webp"), None)
     out["caption"] = (info.get("description") or "").strip()
+    
+    # Extract thumbnail URL from video metadata
+    out["thumbnail_url"] = info.get("thumbnail", "")
+    
     return out
 
 def srt_to_text(path: Path) -> str:
@@ -199,7 +204,7 @@ def gpt_json(prompt: str, temp: float) -> dict:
     )
     return json.loads(rsp.choices[0].message.content)
 
-def extract_recipe(caption: str, srt_text: str, speech: str) -> dict:
+def extract_recipe(caption: str, srt_text: str, speech: str, thumbnail_url: str = "") -> dict:
     prompt = (
         "Build one recipe. Return JSON keys: title, description, "
         "ingredients (list), steps (list).\n\n"
@@ -210,6 +215,8 @@ def extract_recipe(caption: str, srt_text: str, speech: str) -> dict:
         try:
             data = gpt_json(prompt, t)
             if data.get("ingredients") and data.get("steps"):
+                # Add thumbnail URL to the recipe data
+                data["thumbnailUrl"] = thumbnail_url
                 return data
         except Exception:
             continue
@@ -217,7 +224,8 @@ def extract_recipe(caption: str, srt_text: str, speech: str) -> dict:
         "title": "Imported Recipe",
         "description": "Recipe from Reel",
         "ingredients": ["Add ingredients manually."],
-        "steps": ["Add steps manually."]
+        "steps": ["Add steps manually."],
+        "thumbnailUrl": thumbnail_url
     }
 
 async def parse_steps_async(steps: List[str]) -> List[Dict[str, str]]:
@@ -393,7 +401,8 @@ async def import_recipe(req: Request):
             cap = info["caption"]
             srt = srt_to_text(info["subs"]) if info["subs"] else ""
             speech = transcribe(info["audio"]) if info["audio"] else ""
-            recipe = extract_recipe(cap, srt, speech)
+            thumbnail_url = info["thumbnail_url"]
+            recipe = extract_recipe(cap, srt, speech, thumbnail_url)
             return {"success": True, "recipe": recipe, "source": "yt_dlp"}
     except Exception as e:
         try:
@@ -403,9 +412,14 @@ async def import_recipe(req: Request):
                 resp.raise_for_status()
                 html = resp.text
             import html as html_lib
+            
+            # Try to extract thumbnail from og:image meta tag
+            thumbnail_match = re.search(r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']', html, re.IGNORECASE)
+            fallback_thumbnail = html_lib.unescape(thumbnail_match.group(1)) if thumbnail_match else ""
+            
             m = re.search(r'<meta[^>]+property=["\']og:description["\'][^>]+content=["\']([^"\']+)["\']', html, re.IGNORECASE)
             caption = html_lib.unescape(m.group(1)) if m else "Could not extract description."
-            recipe = extract_recipe(caption, "", "")
+            recipe = extract_recipe(caption, "", "", fallback_thumbnail)
             return {"success": True, "recipe": recipe, "source": "fallback", "warning": "Used fallback extraction."}
         except Exception as e2:
             print(f"Fallback scrape failed: {e2}")
