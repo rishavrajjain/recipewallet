@@ -1,3 +1,5 @@
 gcp-service.json
 .env
 *.env
+__pycache__/
+*.pyc
