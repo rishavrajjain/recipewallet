@@ -1,7 +1,7 @@
 # main.py – FastAPI backend (Updated for Render Testing)
-# Reels → recipe JSON + on-demand GPT-4.1 step-image generation
+# Reels, TikTok, Website → recipe JSON + on-demand GPT-4.1 step-image generation
 # User Info → kitchen photos + blood test PDF upload handling
-# deps: openai>=1.21.0 fastapi uvicorn yt-dlp pysrt python-dotenv python-multipart aiofiles
+# deps: openai>=1.21.0 fastapi uvicorn yt-dlp pysrt python-dotenv python-multipart aiofiles beautifulsoup4 lxml
 
 import os, json, time, tempfile, asyncio, base64, uuid, random
 from pathlib import Path
@@ -20,6 +20,8 @@ from openai import OpenAI, AsyncOpenAI
 from pydantic import BaseModel, validator
 import httpx
 import re, urllib.parse
+from bs4 import BeautifulSoup
+
 
 # --- Configuration ---
 load_dotenv()
@@ -150,6 +152,7 @@ class HealthAnalysisResponse(BaseModel):
 
 # --- Core Logic Functions ---
 def run_yt_dlp(url: str, dst: Path) -> dict:
+    """Universal video downloader. Works for YouTube, Instagram, TikTok, etc."""
     out = dict(audio=None, subs=None, thumb=None, caption="", thumbnail_url="")
     opts = {
         "format": "bestaudio/best",
@@ -158,7 +161,7 @@ def run_yt_dlp(url: str, dst: Path) -> dict:
         "writeautomaticsub": True,
         "subtitleslangs": ["en", "hi", ""],
         "subtitlesformat": "srt",
-        "writethumbnail": True,  # Enable thumbnail download
+        "writethumbnail": True,
         "postprocessors": [{
             "key": "FFmpegExtractAudio",
             "preferredcodec": "mp3",
@@ -173,11 +176,8 @@ def run_yt_dlp(url: str, dst: Path) -> dict:
     out["audio"]   = next(base.parent.glob(f"{info['id']}.mp3"), None)
     out["subs"]    = next(base.parent.glob(f"{info['id']}*.srt"), None)
     out["thumb"]   = next(base.parent.glob(f"{info['id']}.jpg"), None) or next(base.parent.glob(f"{info['id']}.webp"), None)
-    out["caption"] = (info.get("description") or "").strip()
-    
-    # Extract thumbnail URL from video metadata
+    out["caption"] = (info.get("description") or info.get("title") or "").strip()
     out["thumbnail_url"] = info.get("thumbnail", "")
-    
     return out
 
 def srt_to_text(path: Path) -> str:
@@ -199,34 +199,97 @@ def gpt_json(prompt: str, temp: float) -> dict:
         response_format={"type": "json_object"},
         messages=[
             {"role": "system", "content": "Return strict JSON only."},
-            {"role": "user",    "content": prompt}
+            {"role": "user",   "content": prompt}
         ]
     )
     return json.loads(rsp.choices[0].message.content)
 
 def extract_recipe(caption: str, srt_text: str, speech: str, thumbnail_url: str = "") -> dict:
     prompt = (
-        "Build one recipe. Return JSON keys: title, description, "
-        "ingredients (list), steps (list).\n\n"
+        "Build one recipe from the text. Return JSON keys: title, description (1 sentence), "
+        "ingredients (list of strings), steps (list of strings).\n\n"
         f"POST_CAPTION:\n{caption}\n\nCLOSED_CAPTIONS:\n{srt_text}\n\n"
-        f"SPEECH_TRANSCRIPT:\n{speech}"
+        f"SPEECH_TRANSCRIPT_OR_PAGE_TEXT:\n{speech}"
     )
     for t in (0.1, 0.5):
         try:
             data = gpt_json(prompt, t)
             if data.get("ingredients") and data.get("steps"):
-                # Add thumbnail URL to the recipe data
                 data["thumbnailUrl"] = thumbnail_url
+                # Add default cookTime, will be overwritten if found by other methods
+                data.setdefault("cookTime", 0) 
                 return data
         except Exception:
             continue
-    return {
-        "title": "Imported Recipe",
-        "description": "Recipe from Reel",
-        "ingredients": ["Add ingredients manually."],
-        "steps": ["Add steps manually."],
-        "thumbnailUrl": thumbnail_url
-    }
+    return {} # Return empty dict on failure
+
+async def extract_recipe_from_spoonacular(url: str, client: httpx.AsyncClient) -> dict:
+    """Extracts a recipe using the Spoonacular API."""
+    if not SPOONACULAR_API_KEY or SPOONACULAR_API_KEY == "YOUR_API_KEY_HERE":
+        return None
+    api_url = "https://api.spoonacular.com/recipes/extract"
+    params = {"url": url, "apiKey": SPOONACULAR_API_KEY}
+    try:
+        response = await client.get(api_url, params=params, timeout=20)
+        response.raise_for_status()
+        data = response.json()
+        if not data.get("extendedIngredients") or not data.get("analyzedInstructions"):
+            return None
+
+        return {
+            "title": data.get("title", "Imported Recipe"),
+            "description": re.sub('<[^<]+?>', '', data.get("summary", "Recipe from Website")).split('.')[0],
+            "thumbnailUrl": data.get("image", ""),
+            "ingredients": [ing.get("original") for ing in data.get("extendedIngredients", [])],
+            "cookTime": data.get("readyInMinutes", 0),
+            "steps": [step.get("step") for inst in data.get("analyzedInstructions", []) for step in inst.get("steps", [])]
+        }
+    except Exception as e:
+        print(f"Spoonacular API call failed for {url}: {e}")
+        return None
+
+def extract_recipe_from_html(html_content: str) -> dict:
+    """Tries to extract a recipe from HTML, prioritizing JSON-LD, then falls back to GPT."""
+    soup = BeautifulSoup(html_content, "lxml")
+    
+    for script in soup.find_all("script", type="application/ld+json"):
+        try:
+            data = json.loads(script.string)
+            graph = data.get("@graph", [data]) 
+            for item in graph:
+                item_type = item.get("@type", "")
+                is_recipe = item_type == "Recipe" or (isinstance(item_type, list) and "Recipe" in item_type)
+                if is_recipe:
+                    steps_raw = item.get("recipeInstructions", [])
+                    steps = [re.sub('<[^<]+?>', '', step.get("text", step)) for step in steps_raw if step]
+
+                    image = item.get("image", "")
+                    img_url = ""
+                    if isinstance(image, dict): img_url = image.get("url", "")
+                    elif isinstance(image, list) and image: img_url = image[0]
+                    else: img_url = image
+
+                    return {
+                        "title": item.get("name", "Imported Recipe"),
+                        "description": item.get("description", "Recipe from Website"),
+                        "thumbnailUrl": img_url,
+                        "ingredients": item.get("recipeIngredient", []),
+                        "steps": steps,
+                        "cookTime": 0
+                    }
+        except Exception:
+            continue
+
+    main_content = soup.find("main") or soup.find("article") or soup.find("body")
+    text_content = ' '.join(main_content.get_text(separator=' ', strip=True).split()) if main_content else ""
+    og_image = soup.find("meta", property="og:image")
+    thumb_url = og_image["content"] if og_image else ""
+    
+    if not text_content: return {}
+    
+    # Fallback to GPT for unstructured text
+    return extract_recipe(caption="", srt_text="", speech=text_content[:15000], thumbnail_url=thumb_url)
+
 
 async def parse_steps_async(steps: List[str]) -> List[Dict[str, str]]:
     joined = "\n".join(f"{i+1}. {s}" for i, s in enumerate(steps))
@@ -242,7 +305,7 @@ async def parse_steps_async(steps: List[str]) -> List[Dict[str, str]]:
         response_format={"type": "json_object"},
         messages=[
             {"role": "system", "content": "Return {'steps':[...]} only."},
-            {"role": "user",    "content": prompt}
+            {"role": "user",   "content": prompt}
         ]
     )
     data  = json.loads(rsp.choices[0].message.content)
@@ -259,14 +322,10 @@ async def parse_steps_async(steps: List[str]) -> List[Dict[str, str]]:
 async def generate_step_image(idx: int, comp: Dict[str, str]) -> Dict[str, str]:
     # --- Dynamic prompt generation with varied props for realism & wow-factor ---
     prop_choices = [
-        "wooden spoon and vintage measuring cups",
-        "ceramic ramekin of chopped fresh herbs",
-        "small glass bowl of colorful spices",
-        "tiny jug of extra-virgin olive oil",
-        "marble mortar and pestle with crushed pepper",
-        "sprig of fresh rosemary on the side",
-        "chef\'s knife with patina finish",
-        "linen napkin and copper spoon",
+        "wooden spoon and vintage measuring cups", "ceramic ramekin of chopped fresh herbs",
+        "small glass bowl of colorful spices", "tiny jug of extra-virgin olive oil",
+        "marble mortar and pestle with crushed pepper", "sprig of fresh rosemary on the side",
+        "chef\'s knife with patina finish", "linen napkin and copper spoon",
         "cast-iron skillet handle peeking in",
     ]
     chosen_props = random.choice(prop_choices)
@@ -287,7 +346,7 @@ async def generate_step_image(idx: int, comp: Dict[str, str]) -> Dict[str, str]:
         prompt=prompt,
         size="1024x1024",
         n=1,
-        response_format="b64_json"  # Request b64_json to handle the file ourselves
+        response_format="b64_json"
     )
 
     if not rsp.data[0].b64_json:
@@ -391,39 +450,53 @@ async def test_health_response():
 
 @app.post("/import-recipe")
 async def import_recipe(req: Request):
-    link = (await req.json()).get("link", "").strip()
+    body = await req.json()
+    link = body.get("link", "").strip()
     if not link:
         raise HTTPException(400, "link is required")
+
+    recipe_data = {}
+    source = "unknown"
+
+    # --- Strategy 1: yt-dlp for video sites (YouTube, Instagram, TikTok) ---
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
-            tmp = Path(tmpdir)
-            info = run_yt_dlp(link, tmp)
-            cap = info["caption"]
-            srt = srt_to_text(info["subs"]) if info["subs"] else ""
-            speech = transcribe(info["audio"]) if info["audio"] else ""
-            thumbnail_url = info["thumbnail_url"]
-            recipe = extract_recipe(cap, srt, speech, thumbnail_url)
-            return {"success": True, "recipe": recipe, "source": "yt_dlp"}
+            info = run_yt_dlp(link, Path(tmpdir))
+            cap, srt, speech, thumb = info["caption"], "", "", info["thumbnail_url"]
+            if info["subs"]: srt = srt_to_text(info["subs"])
+            if info["audio"]: speech = transcribe(info["audio"])
+            
+            if cap or srt or speech:
+                recipe_data = extract_recipe(cap, srt, speech, thumb)
+                if recipe_data: source = "video_extractor"
     except Exception as e:
-        try:
-            print(f"yt_dlp failed: {e}. Falling back to basic scrape…")
-            async with httpx.AsyncClient(timeout=15) as client:
-                resp = await client.get(link, headers={"User-Agent": "Mozilla/5.0"})
-                resp.raise_for_status()
-                html = resp.text
-            import html as html_lib
+        print(f"INFO: yt-dlp failed for '{link}'. Moving to website extractors. Error: {e}")
+
+    # --- Fallback to Website Extraction if Video Extraction Fails ---
+    if not recipe_data:
+        async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
             
-            # Try to extract thumbnail from og:image meta tag
-            thumbnail_match = re.search(r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']', html, re.IGNORECASE)
-            fallback_thumbnail = html_lib.unescape(thumbnail_match.group(1)) if thumbnail_match else ""
-            
-            m = re.search(r'<meta[^>]+property=["\']og:description["\'][^>]+content=["\']([^"\']+)["\']', html, re.IGNORECASE)
-            caption = html_lib.unescape(m.group(1)) if m else "Could not extract description."
-            recipe = extract_recipe(caption, "", "", fallback_thumbnail)
-            return {"success": True, "recipe": recipe, "source": "fallback", "warning": "Used fallback extraction."}
-        except Exception as e2:
-            print(f"Fallback scrape failed: {e2}")
-            raise HTTPException(500, f"Failed to process link: {e}")
+            # --- Strategy 2: Spoonacular API (high-quality) ---
+            recipe_data = await extract_recipe_from_spoonacular(link, client)
+            if recipe_data:
+                source = "spoonacular_api"
+            else:
+                # --- Strategy 3: Local HTML Scraping (JSON-LD or raw text) ---
+                try:
+                    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"}
+                    resp = await client.get(link, headers=headers)
+                    resp.raise_for_status()
+                    recipe_data = extract_recipe_from_html(resp.text)
+                    if recipe_data: source = "website_scrape"
+                except Exception as e2:
+                    print(f"ERROR: Final website scrape method failed for '{link}'. Error: {e2}")
+
+    # --- Final check and response ---
+    if recipe_data and recipe_data.get("steps") and recipe_data.get("ingredients"):
+        return {"success": True, "recipe": recipe_data, "source": source}
+    else:
+        print(f"ERROR: Could not extract recipe from link: {link}")
+        raise HTTPException(500, detail="Failed to extract a valid recipe from the provided link. The content may not be a recipe or the website is not supported.")
 
 @app.post("/generate-step-images")
 async def generate_step_images(req: ImageGenerationRequest):
@@ -608,44 +681,25 @@ def ingredient_image_url(name: str) -> str:
     # --- Step 2: Multi-API Normalization Map ---
     # This is our curated list of high-confidence ingredients.
     multi_api_map = {
-        "rice": {"spoonacular": "rice.jpg", "themealdb": "Rice"},
-        "basmati rice": {"spoonacular": "basmati-rice.jpg", "themealdb": "Basmati Rice"},
-        "jasmine rice": {"spoonacular": "jasmine-rice.jpg", "themealdb": "Jasmine Rice"},
-        "chicken thigh": {"spoonacular": "chicken-thighs.png", "themealdb": "Chicken"},
-        "chicken breast": {"spoonacular": "chicken-breasts.png", "themealdb": "Chicken"},
-        "chicken": {"spoonacular": "whole-chicken.jpg", "themealdb": "Chicken"},
-        "garlic": {"spoonacular": "garlic.png", "themealdb": "Garlic"},
-        "onion": {"spoonacular": "onion.jpg", "themealdb": "Onion"},
-        "red onion": {"spoonacular": "red-onion.png", "themealdb": "Red Onion"},
-        "red pepper": {"spoonacular": "red-bell-pepper.jpg", "themealdb": "Red Bell Pepper"},
-        "green pepper": {"spoonacular": "green-bell-pepper.jpg", "themealdb": "Green Bell Pepper"},
-        "bell pepper": {"spoonacular": "bell-pepper.jpg", "themealdb": "Bell Pepper"},
-        "chicken stock": {"spoonacular": "chicken-broth.png", "themealdb": "Chicken Stock"},
-        "honey": {"spoonacular": "honey.jpg", "themealdb": "Honey"},
-        "oyster sauce": {"spoonacular": "oyster-sauce.jpg", "themealdb": "Oyster Sauce"},
-        "potato": {"spoonacular": "potatoes-yukon-gold.png", "themealdb": "Potatoes"},
-        "carrot": {"spoonacular": "carrots.jpg", "themealdb": "Carrots"},
-        "tomato": {"spoonacular": "tomato.png", "themealdb": "Tomatoes"},
-        "lime": {"spoonacular": "lime.jpg", "themealdb": "Lime"},
-        "lemon": {"spoonacular": "lemon.jpg", "themealdb": "Lemon"},
-        "coriander": {"spoonacular": "cilantro.png", "themealdb": "Coriander"},
-        "cilantro": {"spoonacular": "cilantro.png", "themealdb": "Coriander"},
-        "spring onion": {"spoonacular": "green-onions.jpg", "themealdb": "Scallions"},
-        "scallion": {"spoonacular": "green-onions.jpg", "themealdb": "Scallions"},
-        "ginger": {"spoonacular": "ginger.png", "themealdb": "Ginger"},
-        "soy sauce": {"spoonacular": "soy-sauce.jpg", "themealdb": "Soy Sauce"},
-        "olive oil": {"spoonacular": "olive-oil.jpg", "themealdb": "Olive Oil"},
-        "egg": {"spoonacular": "egg.png", "themealdb": "Egg"},
-        "butter": {"spoonacular": "butter.png", "themealdb": "Butter"},
-        "sugar": {"spoonacular": "sugar-in-bowl.png", "themealdb": "Sugar"},
-        "salt": {"spoonacular": "salt.jpg", "themealdb": "Salt"},
-        "black pepper": {"spoonacular": "black-pepper.png", "themealdb": "Black Pepper"},
-        "paprika": {"spoonacular": "paprika.jpg", "themealdb": "Paprika"},
-        "cumin": {"spoonacular": "cumin.jpg", "themealdb": "Cumin"},
-        "turmeric": {"spoonacular": "turmeric.jpg", "themealdb": "Turmeric"},
-        "basil": {"spoonacular": "basil.jpg", "themealdb": "Basil"},
-        "rosemary": {"spoonacular": "rosemary.jpg", "themealdb": "Rosemary"},
-        "thyme": {"spoonacular": "thyme.jpg", "themealdb": "Thyme"},
+        "rice": {"spoonacular": "rice.jpg", "themealdb": "Rice"}, "basmati rice": {"spoonacular": "basmati-rice.jpg", "themealdb": "Basmati Rice"},
+        "jasmine rice": {"spoonacular": "jasmine-rice.jpg", "themealdb": "Jasmine Rice"}, "chicken thigh": {"spoonacular": "chicken-thighs.png", "themealdb": "Chicken"},
+        "chicken breast": {"spoonacular": "chicken-breasts.png", "themealdb": "Chicken"}, "chicken": {"spoonacular": "whole-chicken.jpg", "themealdb": "Chicken"},
+        "garlic": {"spoonacular": "garlic.png", "themealdb": "Garlic"}, "onion": {"spoonacular": "onion.jpg", "themealdb": "Onion"},
+        "red onion": {"spoonacular": "red-onion.png", "themealdb": "Red Onion"}, "red pepper": {"spoonacular": "red-bell-pepper.jpg", "themealdb": "Red Bell Pepper"},
+        "green pepper": {"spoonacular": "green-bell-pepper.jpg", "themealdb": "Green Bell Pepper"}, "bell pepper": {"spoonacular": "bell-pepper.jpg", "themealdb": "Bell Pepper"},
+        "chicken stock": {"spoonacular": "chicken-broth.png", "themealdb": "Chicken Stock"}, "honey": {"spoonacular": "honey.jpg", "themealdb": "Honey"},
+        "oyster sauce": {"spoonacular": "oyster-sauce.jpg", "themealdb": "Oyster Sauce"}, "potato": {"spoonacular": "potatoes-yukon-gold.png", "themealdb": "Potatoes"},
+        "carrot": {"spoonacular": "carrots.jpg", "themealdb": "Carrots"}, "tomato": {"spoonacular": "tomato.png", "themealdb": "Tomatoes"},
+        "lime": {"spoonacular": "lime.jpg", "themealdb": "Lime"}, "lemon": {"spoonacular": "lemon.jpg", "themealdb": "Lemon"},
+        "coriander": {"spoonacular": "cilantro.png", "themealdb": "Coriander"}, "cilantro": {"spoonacular": "cilantro.png", "themealdb": "Coriander"},
+        "spring onion": {"spoonacular": "green-onions.jpg", "themealdb": "Scallions"}, "scallion": {"spoonacular": "green-onions.jpg", "themealdb": "Scallions"},
+        "ginger": {"spoonacular": "ginger.png", "themealdb": "Ginger"}, "soy sauce": {"spoonacular": "soy-sauce.jpg", "themealdb": "Soy Sauce"},
+        "olive oil": {"spoonacular": "olive-oil.jpg", "themealdb": "Olive Oil"}, "egg": {"spoonacular": "egg.png", "themealdb": "Egg"},
+        "butter": {"spoonacular": "butter.png", "themealdb": "Butter"}, "sugar": {"spoonacular": "sugar-in-bowl.png", "themealdb": "Sugar"},
+        "salt": {"spoonacular": "salt.jpg", "themealdb": "Salt"}, "black pepper": {"spoonacular": "black-pepper.png", "themealdb": "Black Pepper"},
+        "paprika": {"spoonacular": "paprika.jpg", "themealdb": "Paprika"}, "cumin": {"spoonacular": "cumin.jpg", "themealdb": "Cumin"},
+        "turmeric": {"spoonacular": "turmeric.jpg", "themealdb": "Turmeric"}, "basil": {"spoonacular": "basil.jpg", "themealdb": "Basil"},
+        "rosemary": {"spoonacular": "rosemary.jpg", "themealdb": "Rosemary"}, "thyme": {"spoonacular": "thyme.jpg", "themealdb": "Thyme"},
         "water": {"spoonacular": "water.jpg", "themealdb": "Water"},
     }
 
@@ -679,5 +733,5 @@ if __name__ == "__main__":
     if SPOONACULAR_API_KEY and SPOONACULAR_API_KEY != "YOUR_API_KEY_HERE":
         print("✅ Spoonacular API key is configured.")
     else:
-        print("⚠️ WARNING: Spoonacular API key not found. Image quality will be lower.")
+        print("⚠️ WARNING: Spoonacular API key not found. Website recipe import quality may be lower.")
     uvicorn.run("main:app", host="0.0.0.0", port=port, reload=True)

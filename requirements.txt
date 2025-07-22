@@ -24,5 +24,9 @@ aiofiles>=23.2.1  # For async file saving
 # Pydantic model parsing
 pydantic>=2.5.3
 
+# HTML parsing for website recipe extraction
+beautifulsoup4>=4.12.0
+lxml>=4.9.0
+
 # Optional: needed for `ffmpeg` post-processing via yt-dlp
 # Make sure `ffmpeg` is installed on your system (not via pip)
