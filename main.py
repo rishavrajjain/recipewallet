@@ -33,6 +33,8 @@ MAX_STEPS = 10
 
 BASE_URL = os.getenv("BASE_URL", "http://localhost:8000")
 USER_UPLOADS_DIR = Path("/tmp/user_uploads")
+# Create the directory immediately if it doesn't exist
+USER_UPLOADS_DIR.mkdir(exist_ok=True)
 # --- End Configuration ---
 
 @asynccontextmanager
