@@ -1,6 +1,5 @@
-# main.py – FastAPI backend (Updated for Render Testing)
-# Instagram Reels & TikTok → recipe JSON + on-demand GPT-4.1 step-image generation
-# User Info → kitchen photos + blood test PDF upload handling
+# main.py – FastAPI backend
+# Instagram Reels & TikTok → recipe JSON + on-demand GPT-4 step-image generation
 # deps: openai>=1.21.0 fastapi uvicorn yt-dlp pysrt python-dotenv python-multipart aiofiles
 
 import os, json, time, tempfile, asyncio, base64, uuid, random
@@ -8,6 +7,7 @@ from pathlib import Path
 from typing import List, Dict, Union, Optional
 from contextlib import asynccontextmanager
 from datetime import datetime
+from enum import Enum
 
 import yt_dlp, pysrt, aiofiles
 from dotenv import load_dotenv
@@ -17,7 +17,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from openai import OpenAI, AsyncOpenAI
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, field_validator
 import httpx
 import re, urllib.parse
 
@@ -25,15 +25,13 @@ import re, urllib.parse
 load_dotenv()
 client = OpenAI()
 aclient = AsyncOpenAI()
-SPOONACULAR_API_KEY = os.getenv("SPOONACULAR_API_KEY", "")
 
-CHAT_MODEL = "gpt-4-turbo" # Using a standard model name
-IMAGE_MODEL = "dall-e-3" # Using a standard model name
+CHAT_MODEL  = "gpt-4.1"
+IMAGE_MODEL = "gpt-image-1"
 MAX_STEPS = 10
 
 BASE_URL = os.getenv("BASE_URL", "http://localhost:8000")
 USER_UPLOADS_DIR = Path("/tmp/user_uploads")
-# Create the directory immediately if it doesn't exist
 USER_UPLOADS_DIR.mkdir(exist_ok=True)
 # --- End Configuration ---
 
@@ -60,42 +58,60 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 
 app.mount("/images", StaticFiles(directory=USER_UPLOADS_DIR), name="images")
 
-# --- Pydantic Models ---
+# --- Pydantic Models (NEW CONTRACTS) ---
 class ImageGenerationRequest(BaseModel):
     instructions: List[str]
     recipe_title: str = "Recipe"
 
-class IngredientItem(BaseModel):
+class NutritionInfo(BaseModel):
+    calories: Optional[int] = Field(None, description="Estimated total calories for the recipe.")
+    protein: Optional[int] = Field(None, description="Estimated total protein in grams.")
+    carbs: Optional[int] = Field(None, description="Estimated total carbohydrates in grams.")
+    fats: Optional[int] = Field(None, description="Estimated total fats in grams.")
+    portions: Optional[int] = Field(1, description="Estimated number of portions this recipe makes.")
+
+class IngredientCategory(str, Enum):
+    FRUIT_VEG = "Fruit & Vegetables"
+    MEAT_POULTRY_FISH = "Meat, Poultry, Fish"
+    PASTA_RICE_GRAINS = "Pasta, Rice & Grains"
+    HERBS_SPICES = "Herbs & Spices"
+    CUPBOARD_STAPLES = "Cupboard Staples"
+    DAIRY = "Dairy"
+    CANNED_JARRED = "Canned & Jarred"
+    OTHER = "Other"
+
+class CategorizedIngredient(BaseModel):
     name: str
-    imageUrl: str
+    category: IngredientCategory = Field(..., description="The category of the ingredient.")
 
 class Recipe(BaseModel):
-    id: str
-    name: str
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    title: str
     description: str
     imageUrl: str
-    ingredients: List[str]
-    cookTime: int
-    isFromReel: bool
+    prepTime: int = Field(..., description="Preparation time in minutes.")
+    cookTime: int = Field(..., description="Cooking time in minutes.")
+    difficulty: str = Field(..., description="Difficulty rating, e.g., 'Easy', 'Medium', 'Hard'.")
+    nutrition: NutritionInfo
+    ingredients: List[CategorizedIngredient]
     steps: List[str]
-    createdAt: Union[str, datetime]
+    isFromReel: bool = True
+    extractedFrom: str = Field(..., description="Platform source: 'instagram', 'tiktok', 'youtube', or 'website'")
+    creatorHandle: Optional[str] = Field(None, description="Creator's username/handle (e.g., @chefname)")
+    creatorName: Optional[str] = Field(None, description="Creator's display name")
+    createdAt: Union[str, datetime] = Field(default_factory=datetime.utcnow)
 
     @field_validator('createdAt', mode='before')
     @classmethod
     def parse_created_at(cls, v):
-        if isinstance(v, datetime):
-            return v.isoformat()
-        if isinstance(v, (int, float)):
-            # Handle timestamp
-            return datetime.fromtimestamp(v).isoformat()
-        if isinstance(v, str):
-            return v
+        if isinstance(v, datetime): return v.isoformat()
+        if isinstance(v, str): return v
         return str(v)
 
 class HealthAnalysisRequest(BaseModel):
     recipe: Recipe
-    blood_test_id: Optional[str] = None # Make optional
-    include_blood_test: bool = False # Flag to control blood test analysis
+    blood_test_id: Optional[str] = None
+    include_blood_test: bool = False
 
 class BloodMarker(BaseModel):
     marker: str
@@ -112,7 +128,7 @@ class HealthCulprit(BaseModel):
 class HealthBooster(BaseModel):
     ingredient: str
     impact: str
-    severity: str # Renamed from benefit/impact for consistency
+    severity: str
 
 class Recommendations(BaseModel):
     should_avoid: bool
@@ -132,25 +148,19 @@ class HealthAnalysisResponse(BaseModel):
     success: bool
     analysis: Optional[HealthAnalysis] = None
     error: Optional[str] = None
-# --- End Pydantic Models ---
 
+# --- End Pydantic Models ---
 
 # --- Core Logic Functions ---
 def run_yt_dlp(url: str, dst: Path) -> dict:
-    out = dict(audio=None, subs=None, thumb=None, caption="", thumbnail_url="")
+    out = dict(audio=None, subs=None, thumb=None, caption="", thumbnail_url="", platform="", creator_handle="", creator_name="")
     opts = {
         "format": "bestaudio/best",
         "outtmpl": str(dst / "%(id)s.%(ext)s"),
-        "writesubtitles": True,
-        "writeautomaticsub": True,
-        "subtitleslangs": ["en", "hi"], # Removed empty string for clarity
-        "subtitlesformat": "srt",
+        "writesubtitles": True, "writeautomaticsub": True,
+        "subtitleslangs": ["en"], "subtitlesformat": "srt",
         "writethumbnail": True,
-        "postprocessors": [{
-            "key": "FFmpegExtractAudio",
-            "preferredcodec": "mp3",
-            "preferredquality": "192"
-        }],
+        "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "192"}],
         "quiet": True, "no_warnings": True
     }
     
@@ -169,29 +179,42 @@ def run_yt_dlp(url: str, dst: Path) -> dict:
         }
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(url, download=True)
-
     base = dst / info["id"]
     out["audio"] = next(base.parent.glob(f"{info['id']}.mp3"), None)
     out["subs"] = next(base.parent.glob(f"{info['id']}*.srt"), None)
     out["thumb"] = next(base.parent.glob(f"{info['id']}.jpg"), None) or next(base.parent.glob(f"{info['id']}.webp"), None)
-    out["caption"] = (info.get("description") or "").strip()
+    out["caption"] = (info.get("description") or info.get("title") or "").strip()
     out["thumbnail_url"] = info.get("thumbnail", "")
+    
+    # Extract platform and creator information
+    if "instagram.com" in url.lower():
+        out["platform"] = "instagram"
+    elif "tiktok.com" in url.lower():
+        out["platform"] = "tiktok"
+    elif "youtube.com" in url.lower() or "youtu.be" in url.lower():
+        out["platform"] = "youtube"
+    else:
+        out["platform"] = "website"
+    
+    # Extract creator info from yt-dlp metadata
+    out["creator_handle"] = info.get("uploader_id", "") or info.get("channel_id", "")
+    out["creator_name"] = info.get("uploader", "") or info.get("channel", "")
+    
+    # Add @ prefix to handle if it doesn't have one
+    if out["creator_handle"] and not out["creator_handle"].startswith("@"):
+        out["creator_handle"] = f"@{out['creator_handle']}"
+    
     return out
 
 def srt_to_text(path: Path) -> str:
     try:
-        return " ".join(
-            s.text.replace("\n", " ").strip()
-            for s in pysrt.open(str(path), encoding="utf-8")
-        )
+        return " ".join(s.text.replace("\n", " ").strip() for s in pysrt.open(str(path), encoding="utf-8"))
     except Exception:
-        return "" # Return empty string on parsing error
+        return ""
 
 def transcribe(audio_path: Path) -> str:
-    # OpenAI's whisper-1 is highly effective and supports large files
-    model = "whisper-1"
     with audio_path.open("rb") as f:
-        return client.audio.transcriptions.create(model=model, file=f).text
+        return client.audio.transcriptions.create(model="whisper-1", file=f).text
 
 def gpt_json(prompt: str, temp: float) -> dict:
     rsp = client.chat.completions.create(
@@ -199,34 +222,70 @@ def gpt_json(prompt: str, temp: float) -> dict:
         temperature=temp,
         response_format={"type": "json_object"},
         messages=[
-            {"role": "system", "content": "You are a helpful assistant designed to output JSON."},
-            {"role": "user",   "content": prompt}
+            {"role": "system", "content": "You are a culinary assistant. Your task is to accurately parse video transcripts into a structured JSON recipe format. Adhere strictly to the requested schema."},
+            {"role": "user", "content": prompt}
         ]
     )
     return json.loads(rsp.choices[0].message.content)
 
-def extract_recipe(caption: str, srt_text: str, speech: str, thumbnail_url: str = "") -> dict:
+def extract_recipe(caption: str, srt_text: str, speech: str, thumbnail_url: str = "", platform: str = "", creator_handle: str = "", creator_name: str = "") -> dict:
+    categories_list = ", ".join(f'"{cat.value}"' for cat in IngredientCategory)
     prompt = (
-        "Based on the following video content, generate a recipe. "
-        "Return a single JSON object with keys: 'title', 'description', "
-        "'ingredients' (as a list of strings), and 'steps' (as a list of strings).\n\n"
-        f"POST_CAPTION:\n{caption}\n\nCLOSED_CAPTIONS:\n{srt_text}\n\n"
+        "Based on the following video content, generate a detailed recipe. "
+        "Return a SINGLE JSON object. Do not include any text outside the JSON object.\n\n"
+        "**JSON Structure Requirements:**\n"
+                 "- `title`: string (Recipe title)\n"
+        "- `description`: string (A brief, engaging summary)\n"
+        "- `prepTime`: integer (Preparation time in minutes)\n"
+        "- `cookTime`: integer (Cooking time in minutes)\n"
+        "- `difficulty`: string ('Easy', 'Medium', or 'Hard')\n"
+        "- `nutrition`: object with keys `calories`, `protein`, `carbs`, `fats`, `portions` (all integers, estimate if not mentioned, use null if unknown)\n"
+        "- `ingredients`: array of objects. Each object must have:\n"
+        "  - `name`: string (The full ingredient text, e.g., '1 cup of basmati rice')\n"
+        "  - `category`: string (Must be one of: " + categories_list + ")\n"
+        "- `steps`: array of strings (Cooking instructions)\n\n"
+        f"**Video Content:**\n"
+        f"POST_CAPTION:\n{caption}\n\n"
+        f"CLOSED_CAPTIONS:\n{srt_text}\n\n"
         f"SPEECH_TRANSCRIPT:\n{speech}"
     )
-    for t in (0.1, 0.5):
+    for t in (0.1, 0.5): # Try with low temperature first for accuracy
         try:
             data = gpt_json(prompt, t)
-            if data.get("ingredients") and data.get("steps"):
-                data["thumbnailUrl"] = thumbnail_url
+            if data.get("ingredients") and data.get("steps") and data.get("title"):
+                data["imageUrl"] = thumbnail_url or ""
+                data["id"] = str(uuid.uuid4())
+                data["isFromReel"] = True
+                data["extractedFrom"] = platform or "website"
+                data["creatorHandle"] = creator_handle or None
+                data["creatorName"] = creator_name or None
+                data["createdAt"] = datetime.utcnow().isoformat()
+                
+                # Validate with Pydantic to ensure full compliance before returning
+                Recipe.model_validate(data)
                 return data
-        except Exception:
+        except Exception as e:
+            print(f"GPT extraction attempt failed with temp={t}. Error: {e}")
             continue
+
+    # Fallback if GPT fails
     return {
+        "id": str(uuid.uuid4()),
         "title": "Imported Recipe",
-        "description": "Could not automatically extract recipe from Reel.",
-        "ingredients": ["Please add ingredients manually."],
-        "steps": ["Please add steps manually."],
-        "thumbnailUrl": thumbnail_url
+        "description": "Could not automatically extract recipe details from the video.",
+        "imageUrl": thumbnail_url or "",
+        "prepTime": 10, "cookTime": 20, "difficulty": "Medium",
+        "nutrition": {"calories": None, "protein": None, "carbs": None, "fats": None, "portions": 2},
+        "ingredients": [{
+            "name": "Please add ingredients manually.",
+            "category": "Other",
+        }],
+        "steps": ["Could not extract steps. Please add them manually."],
+        "isFromReel": True,
+        "extractedFrom": platform or "website",
+        "creatorHandle": creator_handle or None,
+        "creatorName": creator_name or None,
+        "createdAt": datetime.utcnow().isoformat()
     }
 
 async def parse_steps_async(steps: List[str]) -> List[Dict[str, str]]:
@@ -238,9 +297,7 @@ async def parse_steps_async(steps: List[str]) -> List[Dict[str, str]]:
         "INSTRUCTIONS:\n" + joined
     )
     rsp = await aclient.chat.completions.create(
-        model=CHAT_MODEL,
-        temperature=0.1,
-        response_format={"type": "json_object"},
+        model=CHAT_MODEL, temperature=0.1, response_format={"type": "json_object"},
         messages=[
             {"role": "system", "content": "Return valid JSON matching the user's schema."},
             {"role": "user",   "content": prompt}
@@ -253,127 +310,27 @@ async def parse_steps_async(steps: List[str]) -> List[Dict[str, str]]:
             raise ValueError("Parsed steps do not match expected structure.")
         return items
     except (json.JSONDecodeError, ValueError):
-        return [{"verb": "prepare",
-                 "mainIngredient": "ingredients",
-                 "vessel": "vessel",
-                 "visible_change": "ready"} for _ in steps]
-
+        return [{"verb": "prepare", "mainIngredient": "ingredients", "vessel": "vessel", "visible_change": "ready"} for _ in steps]
 
 async def generate_step_image(idx: int, comp: Dict[str, str]) -> Dict[str, str]:
-    prop_choices = [
-        "wooden spoon and vintage measuring cups", "ceramic ramekin of chopped fresh herbs",
-        "small glass bowl of colorful spices", "tiny jug of extra-virgin olive oil",
-        "marble mortar and pestle with crushed pepper", "sprig of fresh rosemary on the side",
-        "chef's knife with patina finish", "linen napkin and copper spoon",
-        "cast-iron skillet handle peeking in",
-    ]
-    chosen_props = random.choice(prop_choices)
-
     prompt = (
         f"High-resolution food photography, cinematic color grade. "
         f"Scene: Step {idx}. {comp['verb'].capitalize()} {comp['mainIngredient']} "
         f"in {comp['vessel']}; showing {comp['visible_change']}. "
         "Camera: 50 mm prime lens, f/2.8. Angle: top-down 90°. "
-        f"Surface: rustic dark-oak board. Props: {chosen_props}. "
+        "Surface: rustic dark-oak board. Props: wooden spoon, ceramic ramekin of herbs. "
         "Lighting: soft window light from left. Aspect: 1:1. "
         "Negative prompts: no hands, no faces, no brand logos, no text."
     )
-
-    rsp = await aclient.images.generate(
-        model=IMAGE_MODEL,
-        prompt=prompt,
-        size="1024x1024",
-        n=1,
-        response_format="b64_json"
-    )
-
+    rsp = await aclient.images.generate(model=IMAGE_MODEL, prompt=prompt, size="1024x1024", n=1, response_format="b64_json")
     if not rsp.data or not rsp.data[0].b64_json:
         raise ValueError("Image generation failed, no b64_json data returned.")
-
     image_filename = f"{uuid.uuid4()}.png"
     fname = USER_UPLOADS_DIR / image_filename
-
     async with aiofiles.open(fname, "wb") as f:
         await f.write(base64.b64decode(rsp.data[0].b64_json))
-
     url = f"{BASE_URL}/images/{image_filename}"
     return {"step_number": idx, "image_url": url}
-
-# --- Health Analysis Functions ---
-def parse_blood_test_data(blood_test_id: str) -> Dict:
-    """Parse blood test PDF and extract key health markers (mock implementation)."""
-    # In production, this would use OCR/PDF parsing on the file found via blood_test_id
-    return {
-        "cholesterol": {
-            "total": 220, "ldl": 140, "hdl": 45, "triglycerides": 180,
-            "target_ranges": { "total": "< 200 mg/dL", "ldl": "< 100 mg/dL", "hdl": "> 40 mg/dL", "triglycerides": "< 150 mg/dL" }
-        },
-        "blood_sugar": {
-            "fasting_glucose": 105, "hba1c": 5.8,
-            "target_ranges": { "fasting_glucose": "70-99 mg/dL", "hba1c": "< 5.7%" }
-        },
-        "vitamins": {
-            "vitamin_d": 18, "b12": 250,
-            "target_ranges": { "vitamin_d": "30-100 ng/mL", "b12": "200-900 pg/mL" }
-        }
-    }
-
-def extract_blood_test_data(blood_test_id: str) -> Dict:
-    """Mock function to simulate fetching processed blood test data."""
-    pdf_files = list(USER_UPLOADS_DIR.glob(f"*{blood_test_id}*.pdf"))
-    if not pdf_files:
-        # Return a structure with out-of-range values for demonstration
-        return { "ldl_cholesterol": 145.0, "glucose_fasting": 105.0, "vitamin_d": 18.0 }
-    # In a real app, you'd parse pdf_files[0] here.
-    return { "ldl_cholesterol": 145.0, "glucose_fasting": 105.0, "vitamin_d": 18.0 }
-
-async def analyze_recipe_health_impact(recipe: Recipe, blood_data: Dict) -> Dict:
-    """Analyzes recipe impact based on user's blood data."""
-    blood_summary = []
-    if blood_data.get("ldl_cholesterol"): blood_summary.append(f"LDL Cholesterol: {blood_data['ldl_cholesterol']} mg/dL (HIGH)")
-    if blood_data.get("glucose_fasting"): blood_summary.append(f"Fasting Glucose: {blood_data['glucose_fasting']} mg/dL (HIGH)")
-    blood_context = "\n".join(blood_summary)
-
-    # BUGFIX: The Recipe model guarantees ingredients is List[str]. No complex parsing needed.
-    ingredients_list = recipe.ingredients
-
-    prompt = f"""
-Analyze this recipe for someone with these blood test results. Respond in JSON.
-BLOOD TEST RESULTS: {blood_context}
-RECIPE: Name: {recipe.name}, Ingredients: {', '.join(ingredients_list)}
-Return JSON conforming to the HealthAnalysis Pydantic model structure provided in the system prompt.
-"""
-    try:
-        response = await aclient.chat.completions.create(
-            model=CHAT_MODEL,
-            messages=[{"role": "system", "content": "You are a health analysis expert returning JSON for a Pydantic model."}, {"role": "user", "content": prompt}],
-            temperature=0.3, response_format={"type": "json_object"}
-        )
-        return json.loads(response.choices[0].message.content)
-    except Exception as e:
-        print(f"Health analysis error: {e}")
-        return {"overall_score": 50, "risk_level": "medium", "personal_message": "Could not complete analysis."}
-
-async def analyze_recipe_general_health(recipe: Recipe) -> Dict:
-    """Analyzes a recipe for general health without personal data."""
-    # BUGFIX: The Recipe model guarantees ingredients is List[str].
-    ingredients_list = recipe.ingredients
-
-    prompt = f"""
-Analyze this recipe for general health. Respond in JSON.
-RECIPE: Name: {recipe.name}, Ingredients: {', '.join(ingredients_list)}
-Return JSON conforming to the HealthAnalysis Pydantic model, but with 'blood_markers_affected' as an empty list.
-"""
-    try:
-        response = await aclient.chat.completions.create(
-            model=CHAT_MODEL,
-            messages=[{"role": "system", "content": "You are a nutrition expert returning JSON for a Pydantic model."}, {"role": "user", "content": prompt}],
-            temperature=0.3, response_format={"type": "json_object"}
-        )
-        return json.loads(response.choices[0].message.content)
-    except Exception as e:
-        print(f"General health analysis error: {e}")
-        return {"overall_score": 70, "risk_level": "medium", "personal_message": "Could not complete general analysis."}
 
 def _extract_recipe_from_url_sync(link: str, tmpdir: str) -> Dict:
     """Synchronous helper for video processing to run in a thread."""
@@ -383,7 +340,10 @@ def _extract_recipe_from_url_sync(link: str, tmpdir: str) -> Dict:
     srt = srt_to_text(info["subs"]) if info["subs"] else ""
     speech = transcribe(info["audio"]) if info["audio"] else ""
     thumbnail_url = info["thumbnail_url"]
-    recipe = extract_recipe(cap, srt, speech, thumbnail_url)
+    platform = info["platform"]
+    creator_handle = info["creator_handle"]
+    creator_name = info["creator_name"]
+    recipe = extract_recipe(cap, srt, speech, thumbnail_url, platform, creator_handle, creator_name)
     return recipe
 
 # --- API Endpoints ---
@@ -398,14 +358,12 @@ async def import_recipe(req: Request):
         raise HTTPException(400, "link is required")
 
     try:
-        # BUGFIX: Run all blocking I/O (download, file access, sync OpenAI calls)
-        # in a separate thread to not block the server's event loop.
         with tempfile.TemporaryDirectory() as tmpdir:
             recipe = await asyncio.to_thread(_extract_recipe_from_url_sync, link, tmpdir)
             return {"success": True, "recipe": recipe, "source": "yt_dlp"}
     except Exception as e:
+        print(f"yt_dlp failed: {e}. Falling back to basic scrape…")
         try:
-            print(f"yt_dlp failed: {e}. Falling back to basic scrape…")
             async with httpx.AsyncClient(timeout=15) as client:
                 resp = await client.get(link, headers={"User-Agent": "Mozilla/5.0"})
                 resp.raise_for_status()
@@ -417,7 +375,17 @@ async def import_recipe(req: Request):
             desc_match = re.search(r'<meta[^>]+property=["\']og:description["\'][^>]+content=["\']([^"\']+)["\']', html, re.IGNORECASE)
             caption = html_lib.unescape(desc_match.group(1)) if desc_match else "Could not extract description."
 
-            recipe = extract_recipe(caption, "", "", fallback_thumb)
+            # Determine platform for fallback
+            if "instagram.com" in link.lower():
+                platform = "instagram"
+            elif "tiktok.com" in link.lower():
+                platform = "tiktok"
+            elif "youtube.com" in link.lower() or "youtu.be" in link.lower():
+                platform = "youtube"
+            else:
+                platform = "website"
+
+            recipe = extract_recipe(caption, "", "", fallback_thumb, platform, "", "")
             return {"success": True, "recipe": recipe, "source": "fallback", "warning": "Used fallback extraction."}
         except Exception as e2:
             print(f"Fallback scrape failed: {e2}")
@@ -448,49 +416,64 @@ async def generate_step_images(req: ImageGenerationRequest):
             bad.append({"step_number": i + 1, "error": str(r)})
     return {"success": len(bad) == 0, "generated_images": good, "failed_steps": bad}
 
-@app.post("/upload-user-info")
-async def upload_user_info(kitchen_photos: Optional[List[UploadFile]] = File(None), blood_test_pdf: Optional[UploadFile] = File(None)):
-    if not kitchen_photos and not blood_test_pdf:
-        raise HTTPException(400, "No files uploaded.")
+async def analyze_recipe_general_health(recipe: Recipe) -> Dict:
+    """Analyzes a recipe for general health without personal data."""
+    ingredients_list = [ing.name for ing in recipe.ingredients]
+    
+    prompt = f"""
+Analyze this recipe for general health. Return ONLY valid JSON with this exact structure:
 
-    response_data = {}
-    upload_timestamp = int(time.time())
-    if kitchen_photos:
-        kitchen_id = f"kitchen_{uuid.uuid4()}"
-        kitchen_upload_dir = USER_UPLOADS_DIR / kitchen_id
-        kitchen_upload_dir.mkdir(exist_ok=True)
-        for i, photo in enumerate(kitchen_photos):
-            if not photo.content_type or not photo.content_type.startswith("image/"):
-                raise HTTPException(400, f"File '{photo.filename}' is not a valid image.")
-            file_path = kitchen_upload_dir / f"{upload_timestamp}_{i+1}.jpg"
-            try:
-                async with aiofiles.open(file_path, "wb") as f:
-                    await f.write(await photo.read())
-            except Exception as e:
-                raise HTTPException(500, f"Failed to save photo '{photo.filename}': {e}")
-        response_data["kitchen_id"] = kitchen_id
+{{
+  "overall_score": 85,
+  "risk_level": "low",
+  "personal_message": "This recipe is generally healthy...",
+  "main_culprits": [
+    {{"ingredient": "honey", "impact": "high sugar content", "severity": "medium"}}
+  ],
+  "health_boosters": [
+    {{"ingredient": "garlic", "impact": "anti-inflammatory properties", "severity": "high"}}
+  ],
+  "recommendations": {{
+    "should_avoid": false,
+    "modifications": ["Reduce honey by half", "Add more vegetables"],
+    "alternative_recipes": ["Grilled chicken with steamed vegetables"]
+  }},
+  "blood_markers_affected": []
+}}
 
-    if blood_test_pdf:
-        if blood_test_pdf.content_type != "application/pdf":
-            raise HTTPException(400, f"File '{blood_test_pdf.filename}' is not a PDF.")
-        blood_test_id = f"blood_test_{uuid.uuid4()}"
-        file_path = USER_UPLOADS_DIR / f"{blood_test_id}.pdf" # Simplified filename
-        try:
-            async with aiofiles.open(file_path, "wb") as f:
-                await f.write(await blood_test_pdf.read())
-        except Exception as e:
-            raise HTTPException(500, f"Failed to save PDF '{blood_test_pdf.filename}': {e}")
-        response_data["blood_test_id"] = blood_test_id
-    return response_data
+RECIPE: Name: {recipe.title}
+Ingredients: {', '.join(ingredients_list)}
+
+Provide realistic health analysis with scores 1-100, risk_level as "low"/"medium"/"high", and practical recommendations.
+"""
+    try:
+        response = await aclient.chat.completions.create(
+            model=CHAT_MODEL,
+            messages=[{"role": "system", "content": "You are a nutrition expert. Return only valid JSON matching the exact structure provided."}, {"role": "user", "content": prompt}],
+            temperature=0.3, response_format={"type": "json_object"}
+        )
+        return json.loads(response.choices[0].message.content)
+    except Exception as e:
+        print(f"General health analysis error: {e}")
+        return {
+            "overall_score": 70,
+            "risk_level": "medium",
+            "personal_message": "Could not complete general analysis.",
+            "main_culprits": [],
+            "health_boosters": [],
+            "recommendations": {
+                "should_avoid": False,
+                "modifications": [],
+                "alternative_recipes": []
+            },
+            "blood_markers_affected": []
+        }
 
 @app.post("/analyze-health-impact", response_model=HealthAnalysisResponse)
 async def analyze_health_impact(request: HealthAnalysisRequest):
     try:
-        if request.include_blood_test and request.blood_test_id:
-            blood_data = extract_blood_test_data(request.blood_test_id)
-            analysis_result = await analyze_recipe_health_impact(request.recipe, blood_data)
-        else:
-            analysis_result = await analyze_recipe_general_health(request.recipe)
+        # For now, we'll just do general health analysis since blood test functionality was removed
+        analysis_result = await analyze_recipe_general_health(request.recipe)
         return HealthAnalysisResponse(success=True, analysis=analysis_result)
     except HTTPException:
         raise
@@ -498,138 +481,8 @@ async def analyze_health_impact(request: HealthAnalysisRequest):
         print(f"Health analysis error: {e}")
         raise HTTPException(500, f"Failed to analyze health impact: {str(e)}")
 
-@app.get("/check-blood-test/{blood_test_id}")
-async def check_blood_test(blood_test_id: str):
-    exists = any(USER_UPLOADS_DIR.glob(f"*{blood_test_id}*.pdf"))
-    return {"success": True, "blood_test_id": blood_test_id, "exists": exists}
-
-@app.get("/blood-test-summary/{blood_test_id}")
-async def get_blood_test_summary(blood_test_id: str):
-    try:
-        # This uses the mock data function for demonstration
-        blood_data = parse_blood_test_data(blood_test_id)
-        risk_indicators = []
-        if blood_data['cholesterol']['total'] > 200: risk_indicators.append("High Total Cholesterol")
-        if blood_data['cholesterol']['ldl'] > 100: risk_indicators.append("High LDL Cholesterol")
-        if blood_data['cholesterol']['hdl'] < 40: risk_indicators.append("Low HDL Cholesterol")
-        if blood_data['blood_sugar']['fasting_glucose'] > 99: risk_indicators.append("Elevated Fasting Glucose")
-        if blood_data['vitamins']['vitamin_d'] < 30: risk_indicators.append("Vitamin D Deficiency")
-
-        score = max(0, 100 - (len(risk_indicators) * 15))
-        summary = {
-            "risk_indicators": risk_indicators,
-            "key_values": {
-                "total_cholesterol": blood_data['cholesterol']['total'],
-                "ldl_cholesterol": blood_data['cholesterol']['ldl'],
-                "fasting_glucose": blood_data['blood_sugar']['fasting_glucose'],
-            },
-            "overall_health_score": score
-        }
-        return {"success": True, "blood_test_id": blood_test_id, "summary": summary}
-    except Exception as e:
-        raise HTTPException(500, f"Failed to get blood test summary: {str(e)}")
-
-# ==================================================================================
-# ★★★★★★★★★★★★★★★ FINAL PRODUCTION INGREDIENT IMAGE FUNCTION ★★★★★★★★★★★★★★★
-# ==================================================================================
-def get_default_ingredient_image() -> str:
-    """Return a reliable default placeholder image."""
-    return "https://placehold.co/500x500/F5F5F5/BDBDBD?text=Ingredient"
-
-def ingredient_image_url(name: str) -> str:
-    """
-    Provides a professional, "HelloFresh-style" image URL for an ingredient.
-    This function uses a new, more robust cleaning engine before checking for a match
-    in the curated API libraries. "No image is better than a wrong image."
-    """
-    if not name or not isinstance(name, str):
-        return get_default_ingredient_image()
-
-    # --- Step 1: New, Robust Cleaning Engine ---
-    clean_name = name.lower()
-    descriptors_to_remove = [
-        'diced', 'sliced', 'minced', 'chopped', 'to taste', 'for garnish', 'whole',
-        'pitted', 'uncooked', 'cooked', 'raw', 'fresh', 'dried', 'ground', 'canned',
-        'peeled', 'large', 'small', 'medium', 'freshly', 'optional', 'fillet',
-        'boneless', 'skinless'
-    ]
-    # Remove quantities and common units from the beginning.
-    clean_name = re.sub(r"^\s*[\d/.]+\s*(kg|g|ml|l|tbsp|tsp|cup|oz|cloves|pinch)?s?\s+", '', clean_name)
-    # Remove text in parentheses (e.g., " (optional)")
-    clean_name = re.sub(r'\s*\([^)]*\)', '', clean_name)
-    # Remove all descriptive words using word boundaries (\b).
-    descriptor_regex = r'\b(' + '|'.join(descriptors_to_remove) + r')\b'
-    clean_name = re.sub(descriptor_regex, '', clean_name, flags=re.IGNORECASE)
-    # Remove any leftover punctuation and clean up extra whitespace.
-    clean_name = re.sub(r'[,\.]', '', clean_name)
-    clean_name = re.sub(r'\s+', ' ', clean_name).strip()
-
-    # --- Step 2: Multi-API Normalization Map ---
-    multi_api_map = {
-        "basmati rice": {"spoonacular": "basmati-rice.jpg", "themealdb": "Basmati Rice"},
-        "jasmine rice": {"spoonacular": "jasmine-rice.jpg", "themealdb": "Jasmine Rice"},
-        "rice": {"spoonacular": "rice.jpg", "themealdb": "Rice"},
-        "chicken thigh": {"spoonacular": "chicken-thighs.png", "themealdb": "Chicken Thighs"},
-        "chicken breast": {"spoonacular": "chicken-breasts.png", "themealdb": "Chicken Breast"},
-        "chicken": {"spoonacular": "whole-chicken.jpg", "themealdb": "Chicken"},
-        "garlic": {"spoonacular": "garlic.png", "themealdb": "Garlic"},
-        "red onion": {"spoonacular": "red-onion.png", "themealdb": "Red Onion"},
-        "onion": {"spoonacular": "onion.jpg", "themealdb": "Onion"},
-        "red pepper": {"spoonacular": "red-bell-pepper.jpg", "themealdb": "Red Bell Pepper"},
-        "green pepper": {"spoonacular": "green-bell-pepper.jpg", "themealdb": "Green Bell Pepper"},
-        "bell pepper": {"spoonacular": "bell-pepper.jpg", "themealdb": "Bell Pepper"},
-        "chicken stock": {"spoonacular": "chicken-broth.png", "themealdb": "Chicken Stock"},
-        "honey": {"spoonacular": "honey.jpg", "themealdb": "Honey"},
-        "oyster sauce": {"spoonacular": "oyster-sauce.jpg", "themealdb": "Oyster Sauce"},
-        "potato": {"spoonacular": "potatoes-yukon-gold.png", "themealdb": "Potatoes"},
-        "carrot": {"spoonacular": "carrots.jpg", "themealdb": "Carrots"},
-        "tomato": {"spoonacular": "tomato.png", "themealdb": "Tomatoes"},
-        "lime": {"spoonacular": "lime.jpg", "themealdb": "Lime"},
-        "lemon": {"spoonacular": "lemon.jpg", "themealdb": "Lemon"},
-        "coriander": {"spoonacular": "cilantro.png", "themealdb": "Coriander"},
-        "cilantro": {"spoonacular": "cilantro.png", "themealdb": "Coriander"},
-        "spring onion": {"spoonacular": "green-onions.jpg", "themealdb": "Scallions"},
-        "scallion": {"spoonacular": "green-onions.jpg", "themealdb": "Scallions"},
-        "ginger": {"spoonacular": "ginger.png", "themealdb": "Ginger"},
-        "soy sauce": {"spoonacular": "soy-sauce.jpg", "themealdb": "Soy Sauce"},
-        "olive oil": {"spoonacular": "olive-oil.jpg", "themealdb": "Olive Oil"},
-        "egg": {"spoonacular": "egg.png", "themealdb": "Egg"}, "butter": {"spoonacular": "butter.png", "themealdb": "Butter"},
-        "sugar": {"spoonacular": "sugar-in-bowl.png", "themealdb": "Sugar"}, "salt": {"spoonacular": "salt.jpg", "themealdb": "Salt"},
-        "black pepper": {"spoonacular": "black-pepper.png", "themealdb": "Black Pepper"}, "paprika": {"spoonacular": "paprika.jpg", "themealdb": "Paprika"},
-        "cumin": {"spoonacular": "cumin.jpg", "themealdb": "Cumin"}, "turmeric": {"spoonacular": "turmeric.jpg", "themealdb": "Turmeric"},
-        "basil": {"spoonacular": "basil.jpg", "themealdb": "Basil"}, "rosemary": {"spoonacular": "rosemary.jpg", "themealdb": "Rosemary"},
-        "thyme": {"spoonacular": "thyme.jpg", "themealdb": "Thyme"}, "water": {"spoonacular": "water.jpg", "themealdb": "Water"},
-    }
-
-    # BUGFIX: Find the best (longest) match, not just the first one.
-    # This prevents "chicken breast" from matching "chicken".
-    best_match_key = None
-    for key in multi_api_map.keys():
-        if clean_name.startswith(key):
-            if best_match_key is None or len(key) > len(best_match_key):
-                best_match_key = key
-
-    api_names = multi_api_map.get(best_match_key)
-
-    if api_names:
-        # Tier 1: Spoonacular (Highest Quality)
-        if SPOONACULAR_API_KEY and "spoonacular" in api_names:
-            return f"https://spoonacular.com/cdn/ingredients_500x500/{api_names['spoonacular']}"
-
-        # Tier 2: TheMealDB (Great Fallback)
-        if "themealdb" in api_names:
-            formatted_name = urllib.parse.quote(api_names['themealdb'])
-            return f"https://www.themealdb.com/images/ingredients/{formatted_name}.png"
-
-    # --- Final Step: Return Default Placeholder ---
-    print(f"INFO: No high-confidence image match for '{name}' (cleaned: '{clean_name}'). Using placeholder.")
-    return get_default_ingredient_image()
-
 if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", 8000))
-    if SPOONACULAR_API_KEY and SPOONACULAR_API_KEY != "YOUR_API_KEY_HERE":
-        print("✅ Spoonacular API key is configured.")
-    else:
-        print("⚠️ WARNING: Spoonacular API key not found. Ingredient image quality will be lower.")
+    print("✅ Backend service is starting.")
     uvicorn.run("main:app", host="0.0.0.0", port=port, reload=True)
