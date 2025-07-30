@@ -233,17 +233,26 @@ def extract_recipe(caption: str, srt_text: str, speech: str, thumbnail_url: str 
     prompt = (
         "Based on the following video content, generate a detailed recipe. "
         "Return a SINGLE JSON object. Do not include any text outside the JSON object.\n\n"
+        "**CRITICAL: Calculate REALISTIC prep and cook times by analyzing the actual steps:**\n"
+        "- `prepTime`: Count time for chopping, marinating, mixing (usually 5-30 mins)\n"
+        "- `cookTime`: Count actual cooking time mentioned or implied (simmering, frying, baking)\n"
+        "- DO NOT use generic times like 15/20/25 minutes - calculate based on actual recipe steps!\n\n"
         "**JSON Structure Requirements:**\n"
-                 "- `title`: string (Recipe title)\n"
+        "- `title`: string (Recipe title)\n"
         "- `description`: string (A brief, engaging summary)\n"
-        "- `prepTime`: integer (Preparation time in minutes)\n"
-        "- `cookTime`: integer (Cooking time in minutes)\n"
+        "- `prepTime`: integer (REALISTIC preparation time in minutes based on steps)\n"
+        "- `cookTime`: integer (REALISTIC cooking time in minutes based on steps)\n"
         "- `difficulty`: string ('Easy', 'Medium', or 'Hard')\n"
         "- `nutrition`: object with keys `calories`, `protein`, `carbs`, `fats`, `portions` (all integers, estimate if not mentioned, use null if unknown)\n"
         "- `ingredients`: array of objects. Each object must have:\n"
         "  - `name`: string (The full ingredient text, e.g., '1 cup of basmati rice')\n"
         "  - `category`: string (Must be one of: " + categories_list + ")\n"
         "- `steps`: array of strings (Cooking instructions)\n\n"
+        "**Examples of realistic timing:**\n"
+        "- Simple stir-fry: prepTime: 10, cookTime: 8\n"
+        "- Pasta dish: prepTime: 5, cookTime: 12\n"
+        "- Marinated chicken: prepTime: 20, cookTime: 15\n"
+        "- Rice dish: prepTime: 8, cookTime: 18\n\n"
         f"**Video Content:**\n"
         f"POST_CAPTION:\n{caption}\n\n"
         f"CLOSED_CAPTIONS:\n{srt_text}\n\n"
@@ -274,7 +283,7 @@ def extract_recipe(caption: str, srt_text: str, speech: str, thumbnail_url: str 
         "title": "Imported Recipe",
         "description": "Could not automatically extract recipe details from the video.",
         "imageUrl": thumbnail_url or "",
-        "prepTime": 10, "cookTime": 20, "difficulty": "Medium",
+        "prepTime": 5, "cookTime": 10, "difficulty": "Easy",
         "nutrition": {"calories": None, "protein": None, "carbs": None, "fats": None, "portions": 2},
         "ingredients": [{
             "name": "Please add ingredients manually.",
