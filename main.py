@@ -177,14 +177,24 @@ def run_yt_dlp(url: str, dst: Path) -> dict:
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             "Accept-Language": "en-US,en;q=0.5",
         }
+
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(url, download=True)
+
     base = dst / info["id"]
     out["audio"] = next(base.parent.glob(f"{info['id']}.mp3"), None)
     out["subs"] = next(base.parent.glob(f"{info['id']}*.srt"), None)
     out["thumb"] = next(base.parent.glob(f"{info['id']}.jpg"), None) or next(base.parent.glob(f"{info['id']}.webp"), None)
     out["caption"] = (info.get("description") or info.get("title") or "").strip()
-    out["thumbnail_url"] = info.get("thumbnail", "")
+
+    # ✨ MODIFICATION START: Select the best quality thumbnail to avoid play icons
+    if info.get("thumbnails"):
+        # The last thumbnail in the list is usually the highest quality
+        out["thumbnail_url"] = info["thumbnails"][-1]["url"]
+    else:
+        # Fallback to the default if the list isn't available
+        out["thumbnail_url"] = info.get("thumbnail", "")
+    # ✨ MODIFICATION END
     
     # Extract platform and creator information
     if "instagram.com" in url.lower():
