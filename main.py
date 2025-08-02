@@ -1,6 +1,6 @@
 # main.py – FastAPI backend
 # Instagram Reels & TikTok → recipe JSON + on-demand GPT-4 step-image generation
-# deps: openai>=1.21.0 fastapi uvicorn yt-dlp pysrt python-dotenv python-multipart aiofiles
+# deps: openai>=1.21.0 fastapi uvicorn yt-dlp pysrt python-dotenv python-multipart aiofiles httpx
 
 import os, json, time, tempfile, asyncio, base64, uuid, random
 from pathlib import Path
@@ -11,7 +11,7 @@ from enum import Enum
 
 import yt_dlp, pysrt, aiofiles
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Request, File, UploadFile
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.exception_handlers import request_validation_exception_handler
@@ -26,7 +26,7 @@ load_dotenv()
 client = OpenAI()
 aclient = AsyncOpenAI()
 
-CHAT_MODEL  = "gpt-4.1"
+CHAT_MODEL = "gpt-4.1"
 IMAGE_MODEL = "gpt-image-1"
 MAX_STEPS = 10
 
@@ -37,7 +37,6 @@ USER_UPLOADS_DIR.mkdir(exist_ok=True)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Ensure the upload directory exists on startup."""
     USER_UPLOADS_DIR.mkdir(exist_ok=True)
     yield
 
@@ -58,7 +57,168 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 
 app.mount("/images", StaticFiles(directory=USER_UPLOADS_DIR), name="images")
 
-# --- Pydantic Models (NEW CONTRACTS) ---
+# ----------------- Instagram handle extraction utilities -----------------
+
+_ALLOWED = re.compile(r"^[a-z0-9._]{2,30}$")
+
+def normalize_handle(s: str) -> str:
+    """
+    Lowercase, strip @, slashes, spaces, and pipes. Keep only [a-z0-9._].
+    Require at least one letter. Return '' if invalid.
+    """
+    if not s:
+        return ""
+    s = s.strip().lower()
+    s = s.replace("@", "").replace(" ", "").replace("|", "").strip("/")
+    s = "".join(ch for ch in s if ch.isalnum() or ch in "._")
+    
+    if not _ALLOWED.fullmatch(s):
+        return ""
+    if s.isdigit():  # reject pure numeric ids like 52845553550
+        return ""
+    if not re.search(r"[a-z]", s):  # must contain a letter
+        return ""
+    
+    return s
+
+def extract_from_uploader_url(uploader_url: str) -> str:
+    try:
+        parsed = urllib.parse.urlparse(uploader_url)
+        parts = [p for p in parsed.path.split("/") if p]
+        if parts:
+            return normalize_handle(parts[0])
+    except Exception:
+        pass
+    return ""
+
+def public_oembed_handle_sync(url: str) -> str:
+    try:
+        resp = httpx.get(
+            "https://www.instagram.com/oembed/",
+            params={"url": url, "omitscript": "true"},
+            timeout=6,
+            headers={"User-Agent": "Mozilla/5.0"}
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        author_url = data.get("author_url") or ""
+        if author_url:
+            return extract_from_uploader_url(author_url)
+    except Exception:
+        pass
+    return ""
+
+def graph_oembed_handle_sync(url: str) -> str:
+    token = os.getenv("INSTAGRAM_OEMBED_ACCESS_TOKEN", "").strip()
+    if not token:
+        return ""
+    try:
+        resp = httpx.get(
+            "https://graph.facebook.com/v16.0/instagram_oembed",
+            params={"url": url, "omitscript": "true", "access_token": token},
+            timeout=6
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        author_url = data.get("author_url") or ""
+        if author_url:
+            return extract_from_uploader_url(author_url)
+    except Exception:
+        pass
+    return ""
+
+def scrape_instagram_page_handle_sync(url: str) -> str:
+    headers = {
+        "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+    try:
+        resp = httpx.get(url, headers=headers, timeout=8, follow_redirects=True)
+        resp.raise_for_status()
+        html = resp.text
+
+        # Multiple approaches to find the username
+        patterns_to_try = [
+            # Look for "username":"..." in JSON
+            r'"username"\s*:\s*"([A-Za-z0-9._]+)"',
+            # Look for @username in title or meta tags  
+            r'<title[^>]*>.*?@([A-Za-z0-9._]+)',
+            r'content="[^"]*@([A-Za-z0-9._]+)[^"]*"',
+            # Look for profile links
+            r'href="https://www\.instagram\.com/([A-Za-z0-9._]+)/"',
+            r'/([A-Za-z0-9._]+)/\?' '"[^"]*profile',
+            # Look for og:url
+            r'<meta[^>]+property=["\']og:url["\'][^>]+content=["\']https://www\.instagram\.com/([A-Za-z0-9._]+)',
+        ]
+
+        for pattern in patterns_to_try:
+            matches = re.findall(pattern, html, re.IGNORECASE)
+            for match in matches:
+                h = normalize_handle(match)
+                if h:
+                    return h
+
+        # JSON-LD blocks: author.alternateName or author.name
+        for m in re.finditer(r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>', html, re.DOTALL | re.IGNORECASE):
+            try:
+                block = m.group(1)
+                data = json.loads(block.strip())
+                objs = data if isinstance(data, list) else [data]
+                for obj in objs:
+                    author = obj.get("author")
+                    if isinstance(author, dict):
+                        cand = author.get("alternateName") or author.get("name") or ""
+                        h = normalize_handle(cand)
+                        if h:
+                            return h
+                    elif isinstance(author, list):
+                        for a in author:
+                            cand = a.get("alternateName") or a.get("name") or ""
+                            h = normalize_handle(cand)
+                            if h:
+                                return h
+            except Exception:
+                continue
+
+    except Exception:
+        pass
+    return ""
+
+def best_effort_instagram_handle(url: str, info: dict) -> str:
+    """
+    Resolution order:
+      1) uploader_url/channel_url
+      2) public oEmbed
+      3) Graph oEmbed
+      4) HTML scrape
+      5) uploader_id/channel_id only if looks like a real handle (not digits-only)
+    Returns normalized handle without '@'.
+    """
+    for key in ("uploader_url", "channel_url"):
+        h = extract_from_uploader_url(info.get(key, "") or "")
+        if h:
+            return h
+
+    h = public_oembed_handle_sync(url)
+    if h:
+        return h
+
+    h = graph_oembed_handle_sync(url)
+    if h:
+        return h
+
+    h = scrape_instagram_page_handle_sync(url)
+    if h:
+        return h
+
+    for key in ("uploader_id", "channel_id"):
+        h = normalize_handle(info.get(key, "") or "")
+        if h:
+            return h
+
+    return ""
+
+# ----------------- Pydantic Models -----------------
 class ImageGenerationRequest(BaseModel):
     instructions: List[str]
     recipe_title: str = "Recipe"
@@ -89,23 +249,26 @@ class Recipe(BaseModel):
     title: str
     description: str
     imageUrl: str
-    prepTime: int = Field(..., description="Preparation time in minutes.")
-    cookTime: int = Field(..., description="Cooking time in minutes.")
-    difficulty: str = Field(..., description="Difficulty rating, e.g., 'Easy', 'Medium', 'Hard'.")
+    prepTime: int
+    cookTime: int
+    difficulty: str
     nutrition: NutritionInfo
     ingredients: List[CategorizedIngredient]
     steps: List[str]
     isFromReel: bool = True
-    extractedFrom: str = Field(..., description="Platform source: 'instagram', 'tiktok', 'youtube', or 'website'")
-    creatorHandle: Optional[str] = Field(None, description="Creator's username/handle (e.g., @chefname)")
-    creatorName: Optional[str] = Field(None, description="Creator's display name")
+    extractedFrom: str
+    creatorHandle: Optional[str] = None
+    creatorName: Optional[str] = None
+    originalUrl: Optional[str] = Field(None, description="Original URL used to import this recipe")
     createdAt: Union[str, datetime] = Field(default_factory=datetime.utcnow)
 
     @field_validator('createdAt', mode='before')
     @classmethod
     def parse_created_at(cls, v):
-        if isinstance(v, datetime): return v.isoformat()
-        if isinstance(v, str): return v
+        if isinstance(v, datetime):
+            return v.isoformat()
+        if isinstance(v, str):
+            return v
         return str(v)
 
 class HealthAnalysisRequest(BaseModel):
@@ -149,31 +312,25 @@ class HealthAnalysisResponse(BaseModel):
     analysis: Optional[HealthAnalysis] = None
     error: Optional[str] = None
 
-# --- End Pydantic Models ---
-
-# --- Core Logic Functions ---
+# ----------------- Core Logic -----------------
 def run_yt_dlp(url: str, dst: Path) -> dict:
     out = dict(audio=None, subs=None, thumb=None, caption="", thumbnail_url="", platform="", creator_handle="", creator_name="")
     opts = {
         "format": "bestaudio/best",
         "outtmpl": str(dst / "%(id)s.%(ext)s"),
-        "writesubtitles": True, "writeautomaticsub": True,
-        "subtitleslangs": ["en"], "subtitlesformat": "srt",
+        "writesubtitles": True,
+        "writeautomaticsub": True,
+        "subtitleslangs": ["en"],
+        "subtitlesformat": "srt",
         "writethumbnail": True,
         "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "192"}],
-        "quiet": True, "no_warnings": True
+        "quiet": True,
+        "no_warnings": True
     }
-    
-    # Add platform-specific headers for better success rates
-    if "tiktok.com" in url.lower():
+
+    if "tiktok.com" in url.lower() or "instagram.com" in url.lower():
         opts["http_headers"] = {
-            "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 15_0 like Mac OS X) AppleWebKit/605.1.15",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.5",
-        }
-    elif "instagram.com" in url.lower():
-        opts["http_headers"] = {
-            "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 15_0 like Mac OS X) AppleWebKit/605.1.15",
+            "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15",
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             "Accept-Language": "en-US,en;q=0.5",
         }
@@ -187,33 +344,41 @@ def run_yt_dlp(url: str, dst: Path) -> dict:
     out["thumb"] = next(base.parent.glob(f"{info['id']}.jpg"), None) or next(base.parent.glob(f"{info['id']}.webp"), None)
     out["caption"] = (info.get("description") or info.get("title") or "").strip()
 
-    # ✨ MODIFICATION START: Select the best quality thumbnail to avoid play icons
     if info.get("thumbnails"):
-        # The last thumbnail in the list is usually the highest quality
         out["thumbnail_url"] = info["thumbnails"][-1]["url"]
     else:
-        # Fallback to the default if the list isn't available
         out["thumbnail_url"] = info.get("thumbnail", "")
-    # ✨ MODIFICATION END
-    
-    # Extract platform and creator information
+
     if "instagram.com" in url.lower():
         out["platform"] = "instagram"
     elif "tiktok.com" in url.lower():
         out["platform"] = "tiktok"
-    elif "youtube.com" in url.lower() or "youtu.be" in url.lower():
+    elif "youtube.com" in url.lower():
         out["platform"] = "youtube"
     else:
         out["platform"] = "website"
+
+    creator_name = info.get("uploader", "") or info.get("channel", "")
+    creator_handle = ""
+    if "instagram.com" in url.lower():
+        creator_handle = best_effort_instagram_handle(url, info)
+    else:
+        creator_handle = normalize_handle(info.get("uploader_id", "") or info.get("channel_id", ""))
+
+    # Try to salvage from display name like "Foo @bar"
+    if not creator_handle:
+        m = re.search(r'@([A-Za-z0-9._]+)', creator_name or "")
+        if m:
+            creator_handle = normalize_handle(m.group(1))
+
+    # Add @ prefix to creator_handle if it exists
+    if creator_handle:
+        out["creator_handle"] = f"@{creator_handle}"
+    else:
+        out["creator_handle"] = ""
     
-    # Extract creator info from yt-dlp metadata
-    out["creator_handle"] = info.get("uploader_id", "") or info.get("channel_id", "")
-    out["creator_name"] = info.get("uploader", "") or info.get("channel", "")
-    
-    # Add @ prefix to handle if it doesn't have one
-    if out["creator_handle"] and not out["creator_handle"].startswith("@"):
-        out["creator_handle"] = f"@{out['creator_handle']}"
-    
+    out["creator_name"] = creator_name or (creator_handle if creator_handle else "")
+
     return out
 
 def srt_to_text(path: Path) -> str:
@@ -238,62 +403,252 @@ def gpt_json(prompt: str, temp: float) -> dict:
     )
     return json.loads(rsp.choices[0].message.content)
 
-def extract_recipe(caption: str, srt_text: str, speech: str, thumbnail_url: str = "", platform: str = "", creator_handle: str = "", creator_name: str = "") -> dict:
+def _clamp_time(value, default, lo, hi) -> int:
+    try:
+        v = int(value)
+        if v <= 0:  # Explicitly handle 0 and negative values
+            return default
+    except Exception:
+        v = default
+    if v < lo:
+        v = lo
+    if v > hi:
+        v = hi
+    return v
+
+def extract_explicit_times(text: str) -> tuple:
+    """Extract explicit time mentions from recipe text."""
+    import re
+    
+    text_lower = text.lower()
+    max_prep_time = 0
+    max_cook_time = 0
+    
+    # More comprehensive time patterns
+    time_patterns = [
+        # Hours patterns - more flexible
+        (r'(\d+(?:\.\d+)?)\s*(?:to|-)?\s*(\d+(?:\.\d+)?)?\s*hours?', 'hours'),
+        (r'(\d+)\s*hrs?', 'hours'),
+        # Minutes patterns - more flexible  
+        (r'(\d+(?:\.\d+)?)\s*(?:to|-)?\s*(\d+(?:\.\d+)?)?\s*(?:mins?|minutes?)', 'minutes'),
+        # Special slow cooker patterns
+        (r'slow\s+cook(?:er)?.*?(\d+)\s*hours?', 'hours'),
+        (r'cook.*?(?:for|about).*?(\d+)\s*hours?', 'hours'),
+        (r'(\d+)\s*hours?\s*(?:\((\d+)\s*minutes?\))?', 'hours_with_minutes'),
+    ]
+    
+    for pattern, unit_type in time_patterns:
+        matches = re.findall(pattern, text_lower)
+        
+        for match in matches:
+            try:
+                if isinstance(match, tuple):
+                    if unit_type == 'hours_with_minutes' and len(match) == 2:
+                        # Handle "4 hours (240 minutes)" format
+                        hours = int(float(match[0])) if match[0] else 0
+                        extra_minutes = int(float(match[1])) if match[1] else 0
+                        minutes = hours * 60 + extra_minutes
+                    elif len(match) == 2 and match[1]:
+                        # Handle ranges like "2-3 hours"
+                        if unit_type == 'hours':
+                            minutes = int(float(match[1])) * 60
+                        else:
+                            minutes = int(float(match[1]))
+                    else:
+                        # Single value
+                        time_val = match[0] if match[0] else match[1] if len(match) > 1 else '0'
+                        if unit_type == 'hours':
+                            minutes = int(float(time_val)) * 60
+                        else:
+                            minutes = int(float(time_val))
+                else:
+                    # Single match
+                    if unit_type == 'hours':
+                        minutes = int(float(match)) * 60
+                    else:
+                        minutes = int(float(match))
+                
+                # Determine if this is prep or cook time based on context
+                match_pos = text_lower.find(str(match[0]) if isinstance(match, tuple) else str(match))
+                context_start = max(0, match_pos - 150)
+                context_end = min(len(text_lower), match_pos + 150)
+                context = text_lower[context_start:context_end]
+                
+                # Better context classification with priority rules
+                if minutes >= 120:  # 2+ hours is almost always cook time
+                    max_cook_time = max(max_cook_time, minutes)
+                elif any(word in context for word in ['slow cooker', 'slow cook', 'crockpot', 'cook for', 'bake', 'roast', 'simmer', 'boil', 'fry']):
+                    max_cook_time = max(max_cook_time, minutes)
+                elif any(word in context for word in ['prep', 'prepare', 'chop', 'dice', 'slice', 'marinate']):
+                    max_prep_time = max(max_prep_time, minutes)
+                else:
+                    # For ambiguous short times, default to cook time
+                    if minutes > 60:
+                        max_cook_time = max(max_cook_time, minutes)
+                    else:
+                        max_prep_time = max(max_prep_time, minutes)
+                    
+            except (ValueError, IndexError) as e:
+                continue
+    
+    return max_prep_time, max_cook_time
+
+def smart_timing_fallback(ingredients: list, steps: list, recipe_text: str) -> tuple:
+    """Calculate realistic prep and cook times based on recipe complexity."""
+    
+    # First, try to extract explicit time mentions
+    explicit_prep, explicit_cook = extract_explicit_times(recipe_text)
+    
+    # Base times
+    prep_time = max(5, explicit_prep) if explicit_prep > 0 else 5
+    cook_time = max(10, explicit_cook) if explicit_cook > 0 else 10
+    
+    # If we found explicit times, use them as base and add complexity
+    if explicit_cook > 0:
+        cook_time = explicit_cook
+    if explicit_prep > 0:
+        prep_time = explicit_prep
+    
+    # Analyze ingredients for prep complexity only if no explicit prep time
+    if explicit_prep == 0 and ingredients:
+        ingredient_count = len(ingredients)
+        prep_time = max(5, min(25, ingredient_count * 2))
+        
+        # Add time for specific prep-heavy ingredients
+        for ing in ingredients:
+            ing_text = ing.get("name", "").lower() if isinstance(ing, dict) else str(ing).lower()
+            if any(word in ing_text for word in ["onion", "garlic", "ginger"]):
+                prep_time += 3
+            if any(word in ing_text for word in ["marinate", "marinade"]):
+                prep_time += 20
+            if any(word in ing_text for word in ["dice", "chop", "slice", "cut"]):
+                prep_time += 2
+    
+    # Analyze steps for cooking complexity only if no explicit cook time
+    if explicit_cook == 0 and steps:
+        steps_count = len(steps)
+        cook_time = max(8, min(45, steps_count * 5))
+        
+        # Analyze recipe text for cooking methods
+        recipe_lower = recipe_text.lower()
+        cooking_methods = {
+            "slow cook": 240, "slow cooker": 240, "crockpot": 240,  # Default to 4 hours for slow cooker
+            "bake": 30, "roast": 35, "oven": 25,
+            "grill": 15, "bbq": 15,
+            "stir fry": 10, "stir-fry": 10, "saute": 8,
+            "boil": 12, "steam": 10,
+            "fry": 10, "pan fry": 12,
+            "simmer": 20, "braise": 45
+        }
+        
+        for method, time in cooking_methods.items():
+            if method in recipe_lower:
+                cook_time = max(cook_time, time)
+                break
+    
+    # Final bounds check - but allow longer times for slow cooking
+    prep_time = max(3, min(60, prep_time))
+    cook_time = max(5, min(480, cook_time))  # Allow up to 8 hours for slow cooking
+    
+    return prep_time, cook_time
+
+def extract_recipe(caption: str, srt_text: str, speech: str, thumbnail_url: str = "", platform: str = "", creator_handle: str = "", creator_name: str = "", original_url: str = "") -> dict:
     categories_list = ", ".join(f'"{cat.value}"' for cat in IngredientCategory)
     prompt = (
         "Based on the following video content, generate a detailed recipe. "
         "Return a SINGLE JSON object. Do not include any text outside the JSON object.\n\n"
-        "**CRITICAL: Calculate REALISTIC prep and cook times by analyzing the actual steps:**\n"
-        "- `prepTime`: Count time for chopping, marinating, mixing (usually 5-30 mins)\n"
-        "- `cookTime`: Count actual cooking time mentioned or implied (simmering, frying, baking)\n"
-        "- DO NOT use generic times like 15/20/25 minutes - calculate based on actual recipe steps!\n\n"
-        "**JSON Structure Requirements:**\n"
+        "🔥 CRITICAL TIMING REQUIREMENTS (NEVER IGNORE):\n"
+        "You MUST calculate REALISTIC prep and cook times like a world-class chef:\n\n"
+        "PREP TIME CALCULATION:\n"
+        "- Chopping 1 onion: 2-3 minutes\n"
+        "- Mincing garlic: 1 minute per clove\n"
+        "- Cutting vegetables: 2-3 minutes per item\n"
+        "- Cutting meat/protein: 5-8 minutes\n"
+        "- Measuring ingredients: 1-2 minutes per ingredient\n"
+        "- Marinating: 15-30 minutes minimum\n"
+        "- Making sauce/dressing: 3-5 minutes\n"
+        "ADD UP ALL PREP STEPS = prepTime (minimum 3, maximum 60 minutes)\n\n"
+        "COOK TIME CALCULATION:\n"
+        "- Sautéing vegetables: 5-8 minutes\n"
+        "- Frying chicken/meat: 8-15 minutes\n"
+        "- Boiling pasta: 8-12 minutes\n"
+        "- Cooking rice: 18-20 minutes\n"
+        "- Baking (oven): 20-45 minutes\n"
+        "- Slow cooking: 120-360 minutes (2-6 hours)\n"
+        "- Grilling: 10-20 minutes\n"
+        "- Steaming: 5-15 minutes\n"
+        "ADD UP ALL COOKING STEPS = cookTime (minimum 3, maximum 180 minutes)\n\n"
+        "⚠️ MANDATORY: prepTime and cookTime MUST be positive integers. NEVER null, undefined, or 0!\n\n"
+        "JSON Structure Requirements:\n"
         "- `title`: string (Recipe title)\n"
-        "- `description`: string (A brief, engaging summary)\n"
-        "- `prepTime`: integer (REALISTIC preparation time in minutes based on steps)\n"
-        "- `cookTime`: integer (REALISTIC cooking time in minutes based on steps)\n"
-        "- `difficulty`: string ('Easy', 'Medium', or 'Hard')\n"
-        "- `nutrition`: object with keys `calories`, `protein`, `carbs`, `fats`, `portions` (all integers, estimate if not mentioned, use null if unknown)\n"
-        "- `ingredients`: array of objects. Each object must have:\n"
-        "  - `name`: string (The full ingredient text, e.g., '1 cup of basmati rice')\n"
-        "  - `category`: string (Must be one of: " + categories_list + ")\n"
-        "- `steps`: array of strings (Cooking instructions)\n\n"
-        "**Examples of realistic timing:**\n"
+        "- `description`: string (Brief, engaging summary)\n"
+        "- `prepTime`: integer (REQUIRED - calculated prep time in minutes)\n"
+        "- `cookTime`: integer (REQUIRED - calculated cook time in minutes)\n"
+        "- `difficulty`: string ('Easy', 'Medium', 'Hard')\n"
+        "- `nutrition`: object with keys `calories`, `protein`, `carbs`, `fats`, `portions` (integers or null)\n"
+        "- `ingredients`: array of objects with `name` and `category` in [" + categories_list + "]\n"
+        "- `steps`: array of strings (Clear cooking instructions)\n\n"
+        "TIMING EXAMPLES:\n"
         "- Simple stir-fry: prepTime: 10, cookTime: 8\n"
-        "- Pasta dish: prepTime: 5, cookTime: 12\n"
-        "- Marinated chicken: prepTime: 20, cookTime: 15\n"
-        "- Rice dish: prepTime: 8, cookTime: 18\n\n"
-        f"**Video Content:**\n"
+        "- Pasta with sauce: prepTime: 8, cookTime: 15\n"
+        "- Roasted chicken: prepTime: 15, cookTime: 45\n"
+        "- Slow cooker meal: prepTime: 20, cookTime: 240\n"
+        "- Quick salad: prepTime: 8, cookTime: 3\n\n"
+        f"VIDEO CONTENT TO ANALYZE:\n"
         f"POST_CAPTION:\n{caption}\n\n"
         f"CLOSED_CAPTIONS:\n{srt_text}\n\n"
         f"SPEECH_TRANSCRIPT:\n{speech}"
     )
-    for t in (0.1, 0.5): # Try with low temperature first for accuracy
+    for t in (0.1, 0.5):
         try:
             data = gpt_json(prompt, t)
             if data.get("ingredients") and data.get("steps") and data.get("title"):
+                # ALWAYS check for explicit times and override GPT if found
+                ingredients = data.get("ingredients", [])
+                steps = data.get("steps", [])
+                recipe_text = f"{caption} {srt_text} {speech}"
+                
+                # Include steps text in the analysis
+                if steps:
+                    recipe_text += " " + " ".join(steps)
+                
+                smart_prep, smart_cook = smart_timing_fallback(ingredients, steps, recipe_text)
+                
+                # Use explicit times if found, otherwise use GPT + smart fallback
+                explicit_prep, explicit_cook = extract_explicit_times(recipe_text)
+                
+                final_prep = explicit_prep if explicit_prep > 0 else _clamp_time(data.get("prepTime"), default=smart_prep, lo=3, hi=60)
+                final_cook = explicit_cook if explicit_cook > 0 else _clamp_time(data.get("cookTime"), default=smart_cook, lo=5, hi=480)
+                
+                data["prepTime"] = final_prep
+                data["cookTime"] = final_cook
+
                 data["imageUrl"] = thumbnail_url or ""
                 data["id"] = str(uuid.uuid4())
                 data["isFromReel"] = True
                 data["extractedFrom"] = platform or "website"
                 data["creatorHandle"] = creator_handle or None
                 data["creatorName"] = creator_name or None
+                data["originalUrl"] = original_url or None
                 data["createdAt"] = datetime.utcnow().isoformat()
-                
-                # Validate with Pydantic to ensure full compliance before returning
                 Recipe.model_validate(data)
                 return data
         except Exception as e:
             print(f"GPT extraction attempt failed with temp={t}. Error: {e}")
             continue
 
-    # Fallback if GPT fails
+    # hard fallback if GPT fails completely
+    recipe_text = f"{caption} {srt_text} {speech}"
+    fallback_prep, fallback_cook = smart_timing_fallback([], [], recipe_text)
+    
     return {
         "id": str(uuid.uuid4()),
         "title": "Imported Recipe",
         "description": "Could not automatically extract recipe details from the video.",
         "imageUrl": thumbnail_url or "",
-        "prepTime": 5, "cookTime": 10, "difficulty": "Easy",
+        "prepTime": fallback_prep,
+        "cookTime": fallback_cook,
+        "difficulty": "Easy",
         "nutrition": {"calories": None, "protein": None, "carbs": None, "fats": None, "portions": 2},
         "ingredients": [{
             "name": "Please add ingredients manually.",
@@ -304,6 +659,7 @@ def extract_recipe(caption: str, srt_text: str, speech: str, thumbnail_url: str 
         "extractedFrom": platform or "website",
         "creatorHandle": creator_handle or None,
         "creatorName": creator_name or None,
+        "originalUrl": original_url or None,
         "createdAt": datetime.utcnow().isoformat()
     }
 
@@ -316,10 +672,12 @@ async def parse_steps_async(steps: List[str]) -> List[Dict[str, str]]:
         "INSTRUCTIONS:\n" + joined
     )
     rsp = await aclient.chat.completions.create(
-        model=CHAT_MODEL, temperature=0.1, response_format={"type": "json_object"},
+        model=CHAT_MODEL,
+        temperature=0.1,
+        response_format={"type": "json_object"},
         messages=[
             {"role": "system", "content": "Return valid JSON matching the user's schema."},
-            {"role": "user",   "content": prompt}
+            {"role": "user", "content": prompt}
         ]
     )
     try:
@@ -352,7 +710,6 @@ async def generate_step_image(idx: int, comp: Dict[str, str]) -> Dict[str, str]:
     return {"step_number": idx, "image_url": url}
 
 def _extract_recipe_from_url_sync(link: str, tmpdir: str) -> Dict:
-    """Synchronous helper for video processing to run in a thread."""
     tmp = Path(tmpdir)
     info = run_yt_dlp(link, tmp)
     cap = info["caption"]
@@ -362,10 +719,10 @@ def _extract_recipe_from_url_sync(link: str, tmpdir: str) -> Dict:
     platform = info["platform"]
     creator_handle = info["creator_handle"]
     creator_name = info["creator_name"]
-    recipe = extract_recipe(cap, srt, speech, thumbnail_url, platform, creator_handle, creator_name)
+    recipe = extract_recipe(cap, srt, speech, thumbnail_url, platform, creator_handle, creator_name, link)
     return recipe
 
-# --- API Endpoints ---
+# ----------------- API Endpoints -----------------
 @app.get("/health")
 async def health():
     return {"status": "ok", "timestamp": datetime.now().isoformat()}
@@ -383,8 +740,8 @@ async def import_recipe(req: Request):
     except Exception as e:
         print(f"yt_dlp failed: {e}. Falling back to basic scrape…")
         try:
-            async with httpx.AsyncClient(timeout=15) as client:
-                resp = await client.get(link, headers={"User-Agent": "Mozilla/5.0"})
+            async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client_:
+                resp = await client_.get(link, headers={"User-Agent": "Mozilla/5.0"})
                 resp.raise_for_status()
                 html = resp.text
 
@@ -394,7 +751,6 @@ async def import_recipe(req: Request):
             desc_match = re.search(r'<meta[^>]+property=["\']og:description["\'][^>]+content=["\']([^"\']+)["\']', html, re.IGNORECASE)
             caption = html_lib.unescape(desc_match.group(1)) if desc_match else "Could not extract description."
 
-            # Determine platform for fallback
             if "instagram.com" in link.lower():
                 platform = "instagram"
             elif "tiktok.com" in link.lower():
@@ -404,11 +760,13 @@ async def import_recipe(req: Request):
             else:
                 platform = "website"
 
-            recipe = extract_recipe(caption, "", "", fallback_thumb, platform, "", "")
+            handle = public_oembed_handle_sync(link) or graph_oembed_handle_sync(link) or scrape_instagram_page_handle_sync(link)
+
+            recipe = extract_recipe(caption, "", "", fallback_thumb, platform, handle, "", link)
             return {"success": True, "recipe": recipe, "source": "fallback", "warning": "Used fallback extraction."}
         except Exception as e2:
             print(f"Fallback scrape failed: {e2}")
-            raise HTTPException(500, f"Failed to process link: {e}")
+            raise HTTPException(500, f"Failed to process link: {e2}")
 
 @app.post("/generate-step-images")
 async def generate_step_images(req: ImageGenerationRequest):
@@ -417,7 +775,7 @@ async def generate_step_images(req: ImageGenerationRequest):
         raise HTTPException(400, "instructions list is empty")
 
     comps = await parse_steps_async(steps)
-    sem = asyncio.Semaphore(5) # Limit concurrent requests to OpenAI
+    sem = asyncio.Semaphore(5)
 
     async def worker(i, c):
         async with sem:
@@ -436,9 +794,8 @@ async def generate_step_images(req: ImageGenerationRequest):
     return {"success": len(bad) == 0, "generated_images": good, "failed_steps": bad}
 
 async def analyze_recipe_general_health(recipe: Recipe) -> Dict:
-    """Analyzes a recipe for general health without personal data."""
     ingredients_list = [ing.name for ing in recipe.ingredients]
-    
+
     prompt = f"""
 Analyze this recipe for general health. Return ONLY valid JSON with this exact structure:
 
@@ -469,7 +826,8 @@ Provide realistic health analysis with scores 1-100, risk_level as "low"/"medium
         response = await aclient.chat.completions.create(
             model=CHAT_MODEL,
             messages=[{"role": "system", "content": "You are a nutrition expert. Return only valid JSON matching the exact structure provided."}, {"role": "user", "content": prompt}],
-            temperature=0.3, response_format={"type": "json_object"}
+            temperature=0.3,
+            response_format={"type": "json_object"}
         )
         return json.loads(response.choices[0].message.content)
     except Exception as e:
@@ -491,7 +849,6 @@ Provide realistic health analysis with scores 1-100, risk_level as "low"/"medium
 @app.post("/analyze-health-impact", response_model=HealthAnalysisResponse)
 async def analyze_health_impact(request: HealthAnalysisRequest):
     try:
-        # For now, we'll just do general health analysis since blood test functionality was removed
         analysis_result = await analyze_recipe_general_health(request.recipe)
         return HealthAnalysisResponse(success=True, analysis=analysis_result)
     except HTTPException:
