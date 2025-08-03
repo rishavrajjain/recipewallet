@@ -475,11 +475,14 @@ def extract_explicit_times(text: str) -> tuple:
                 context = text_lower[context_start:context_end]
                 
                 # Better context classification with priority rules
-                if minutes >= 120:  # 2+ hours is almost always cook time
+                # FIRST: Exclude marination times completely
+                if any(word in context for word in ['marinate', 'marinade', 'marinating', 'marinated']):
+                    continue  # Skip marination times entirely
+                elif minutes >= 120:  # 2+ hours is almost always cook time
                     max_cook_time = max(max_cook_time, minutes)
                 elif any(word in context for word in ['slow cooker', 'slow cook', 'crockpot', 'cook for', 'bake', 'roast', 'simmer', 'boil', 'fry']):
                     max_cook_time = max(max_cook_time, minutes)
-                elif any(word in context for word in ['prep', 'prepare', 'chop', 'dice', 'slice', 'marinate']):
+                elif any(word in context for word in ['prep', 'prepare', 'chop', 'dice', 'slice']):
                     max_prep_time = max(max_prep_time, minutes)
                 else:
                     # For ambiguous short times, default to cook time
@@ -558,26 +561,31 @@ def extract_recipe(caption: str, srt_text: str, speech: str, thumbnail_url: str 
         "Based on the following video content, generate a detailed recipe. "
         "Return a SINGLE JSON object. Do not include any text outside the JSON object.\n\n"
         "🔥 CRITICAL TIMING REQUIREMENTS (NEVER IGNORE):\n"
-        "You MUST calculate REALISTIC prep and cook times like a world-class chef:\n\n"
+        "You MUST calculate REALISTIC prep and cook times like a world-class chef:\n"
+        "🚫 MARINATION TIME IS NEVER INCLUDED IN PREP OR COOK TIME - ONLY ACTIVE COOKING TIME!\n\n"
         "PREP TIME CALCULATION:\n"
-        "- Chopping 1 onion: 2-3 minutes\n"
+        "- Chopping 1 onion: 1 minute\n"
         "- Mincing garlic: 1 minute per clove\n"
-        "- Cutting vegetables: 2-3 minutes per item\n"
-        "- Cutting meat/protein: 5-8 minutes\n"
-        "- Measuring ingredients: 1-2 minutes per ingredient\n"
-        "- Marinating: 15-30 minutes minimum\n"
-        "- Making sauce/dressing: 3-5 minutes\n"
-        "ADD UP ALL PREP STEPS = prepTime (minimum 3, maximum 60 minutes)\n\n"
+        "- Cutting vegetables: 1 minute per item, limit to 8 minutes total\n"
+        "- Cutting meat/protein: 5 minutes\n"
+        "- Include marination ingredient prep in 'Prep Time' but NOT actual marinating time\n"
+        "ADD UP ALL PREP STEPS = prepTime (minimum 2, maximum 60 minutes)\n\n"
         "COOK TIME CALCULATION:\n"
         "- Sautéing vegetables: 5-8 minutes\n"
         "- Frying chicken/meat: 8-15 minutes\n"
         "- Boiling pasta: 8-12 minutes\n"
-        "- Cooking rice: 18-20 minutes\n"
+        "- Cooking rice: 12-20 minutes\n"
         "- Baking (oven): 20-45 minutes\n"
-        "- Slow cooking: 120-360 minutes (2-6 hours)\n"
-        "- Grilling: 10-20 minutes\n"
+        "- Slow cooking: 120-360 minutes (2-8 hours)\n"
+        "- Grilling: 5-20 minutes\n"
         "- Steaming: 5-15 minutes\n"
-        "ADD UP ALL COOKING STEPS = cookTime (minimum 3, maximum 180 minutes)\n\n"
+        "- Making sauce/dressing/salsa: 3-5 minutes\n"
+        "- Do NOT include marination time in Prep or Cook Time calculation\n"
+        "- If recipe mentions marinating, mention it in steps but EXCLUDE from timing calculations\n"
+        "ADD UP ALL COOKING STEPS = cookTime (minimum 3 minutes)\n\n"
+        "COOKING CONTEXT:\n"
+        "- If raw meat is added to a broth, it can be boiled in 4-20 minutes dependent on the meat\n"
+        "- If we do not supply a specific cut of meat in the ingredient list, do not mention specific cooking times in the instructions, instead supply options or say to cook the meat dependent on the cut\n\n"
         "⚠️ MANDATORY: prepTime and cookTime MUST be positive integers. NEVER null, undefined, or 0!\n\n"
         "JSON Structure Requirements:\n"
         "- `title`: string (Recipe title)\n"
@@ -586,13 +594,14 @@ def extract_recipe(caption: str, srt_text: str, speech: str, thumbnail_url: str 
         "- `cookTime`: integer (REQUIRED - calculated cook time in minutes)\n"
         "- `difficulty`: string ('Easy', 'Medium', 'Hard')\n"
         "- `nutrition`: object with keys `calories`, `protein`, `carbs`, `fats`, `portions` (integers or null)\n"
+        "- Every recipe should have a protein, carbohydrates and total fat value which is based on accumulative values of all the ingredients divided by the number of portions\n"
         "- `ingredients`: array of objects with `name` and `category` in [" + categories_list + "]\n"
         "- `steps`: array of strings (Clear cooking instructions)\n\n"
         "TIMING EXAMPLES:\n"
-        "- Simple stir-fry: prepTime: 10, cookTime: 8\n"
+        "- Simple stir-fry: prepTime: 10, cookTime: 14\n"
         "- Pasta with sauce: prepTime: 8, cookTime: 15\n"
-        "- Roasted chicken: prepTime: 15, cookTime: 45\n"
-        "- Slow cooker meal: prepTime: 20, cookTime: 240\n"
+        "- Roasted chicken: prepTime: 10, cookTime: 45\n"
+        "- Slow cooker meal: prepTime: 20, cookTime: 360\n"
         "- Quick salad: prepTime: 8, cookTime: 3\n\n"
         f"VIDEO CONTENT TO ANALYZE:\n"
         f"POST_CAPTION:\n{caption}\n\n"
