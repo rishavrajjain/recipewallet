@@ -338,7 +338,25 @@ def run_yt_dlp(url: str, dst: Path) -> dict:
     # Try different approaches for Instagram
     if "instagram.com" in url.lower():
         approaches = [
-            # Approach 1: Standard with enhanced headers
+            # Approach 1: Metadata only (no download) - for production testing
+            {
+                "opts": {
+                    "skip_download": True,  # Don't download the video
+                    "writethumbnail": True,
+                    "quiet": True,
+                    "no_warnings": True,
+                    "http_headers": enhanced_headers,
+                    "retries": 3,
+                    "fragment_retries": 3,
+                    "extractor_retries": 3,
+                    "sleep_interval": 2,
+                    "max_sleep_interval": 5,
+                    "ignoreerrors": False,
+                    "no_check_certificate": True,
+                },
+                "name": "metadata_only"
+            },
+            # Approach 2: Standard with enhanced headers
             {
                 "opts": {
                     "format": "bestaudio/best",
@@ -362,7 +380,7 @@ def run_yt_dlp(url: str, dst: Path) -> dict:
                 },
                 "name": "standard"
             },
-            # Approach 2: With cookies and different extractor args
+            # Approach 3: With extractor args but no cookies
             {
                 "opts": {
                     "format": "bestaudio/best",
@@ -391,37 +409,6 @@ def run_yt_dlp(url: str, dst: Path) -> dict:
                     }
                 },
                 "name": "with_extractor_args"
-            },
-            # Approach 3: Try with cookies from browser (if available)
-            {
-                "opts": {
-                    "format": "bestaudio/best",
-                    "outtmpl": str(dst / "%(id)s.%(ext)s"),
-                    "writesubtitles": True,
-                    "writeautomaticsub": True,
-                    "subtitleslangs": ["en"],
-                    "subtitlesformat": "srt",
-                    "writethumbnail": True,
-                    "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "192"}],
-                    "quiet": True,
-                    "no_warnings": True,
-                    "http_headers": enhanced_headers,
-                    "retries": 3,
-                    "fragment_retries": 3,
-                    "extractor_retries": 3,
-                    "sleep_interval": 5,
-                    "max_sleep_interval": 10,
-                    "ignoreerrors": False,
-                    "no_check_certificate": True,
-                    "cookiesfrombrowser": ("chrome",),  # Try to get cookies from Chrome
-                    "extractor_args": {
-                        "instagram": {
-                            "login": None,
-                            "password": None,
-                        }
-                    }
-                },
-                "name": "with_cookies"
             }
         ]
     else:
@@ -460,28 +447,18 @@ def run_yt_dlp(url: str, dst: Path) -> dict:
         
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
-                info = ydl.extract_info(url, download=True)
+                if approach_name == "metadata_only":
+                    # For metadata-only approach, don't download
+                    info = ydl.extract_info(url, download=False)
+                    print("Metadata extraction successful.")
+                else:
+                    info = ydl.extract_info(url, download=True)
+                    print("Download successful.")
             # If successful, break the loop
-            print("Download successful.")
             break
         except Exception as e:
             last_exception = e
             print(f"Download attempt failed with approach {approach_name}. Error: {e}")
-            # Clear the destination directory for the next attempt
-            for item in dst.glob("*"):
-                if item.is_file():
-                    item.unlink()
-            continue
-
-        try:
-            with yt_dlp.YoutubeDL(opts) as ydl:
-                info = ydl.extract_info(url, download=True)
-            # If successful, break the loop
-            print("Download successful.")
-            break
-        except Exception as e:
-            last_exception = e
-            print(f"Download attempt failed. Error: {e}")
             # Clear the destination directory for the next attempt
             for item in dst.glob("*"):
                 if item.is_file():
@@ -495,10 +472,21 @@ def run_yt_dlp(url: str, dst: Path) -> dict:
             raise Exception("yt-dlp failed for unknown reasons.")
 
     base = dst / info["id"]
-    out["audio"] = next(base.parent.glob(f"{info['id']}.mp3"), None)
-    out["subs"] = next(base.parent.glob(f"{info['id']}*.srt"), None)
-    out["thumb"] = next(base.parent.glob(f"{info['id']}.jpg"), None) or next(base.parent.glob(f"{info['id']}.webp"), None)
-    out["caption"] = (info.get("description") or info.get("title") or "").strip()
+    
+    # Handle metadata-only approach
+    if info and "skip_download" in str(opts):
+        # For metadata-only approach, we don't have downloaded files
+        out["audio"] = None
+        out["subs"] = None
+        out["thumb"] = next(base.parent.glob(f"{info['id']}.jpg"), None) or next(base.parent.glob(f"{info['id']}.webp"), None)
+        out["caption"] = (info.get("description") or info.get("title") or "").strip()
+        print("Using metadata-only approach - no audio/subtitles available")
+    else:
+        # Standard approach with downloaded files
+        out["audio"] = next(base.parent.glob(f"{info['id']}.mp3"), None)
+        out["subs"] = next(base.parent.glob(f"{info['id']}*.srt"), None)
+        out["thumb"] = next(base.parent.glob(f"{info['id']}.jpg"), None) or next(base.parent.glob(f"{info['id']}.webp"), None)
+        out["caption"] = (info.get("description") or info.get("title") or "").strip()
 
     if info.get("thumbnails"):
         out["thumbnail_url"] = info["thumbnails"][-1]["url"]
@@ -879,7 +867,14 @@ def _extract_recipe_from_url_sync(link: str, tmpdir: str) -> Dict:
     info = run_yt_dlp(link, tmp)
     cap = info["caption"]
     srt = srt_to_text(info["subs"]) if info["subs"] else ""
-    speech = transcribe(info["audio"]) if info["audio"] else ""
+    
+    # Handle metadata-only approach (no audio file)
+    if info["audio"] is None:
+        print("No audio file available - using metadata only")
+        speech = ""
+    else:
+        speech = transcribe(info["audio"]) if info["audio"] else ""
+    
     thumbnail_url = info["thumbnail_url"]
     platform = info["platform"]
     creator_handle = info["creator_handle"]
