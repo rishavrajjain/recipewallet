@@ -316,46 +316,162 @@ class HealthAnalysisResponse(BaseModel):
 def run_yt_dlp(url: str, dst: Path) -> dict:
     out = dict(audio=None, subs=None, thumb=None, caption="", thumbnail_url="", platform="", creator_handle="", creator_name="")
 
-    # List of proxies to try
-    proxies = [
-        None,  # First attempt with no proxy
-        "http://proxy.zenrows.com:8001",
-        # Add more proxies here if needed
-    ]
+    # Enhanced headers to avoid rate limiting
+    enhanced_headers = {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept-Encoding": "gzip, deflate, br",
+        "DNT": "1",
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+        "Sec-Fetch-User": "?1",
+        "Cache-Control": "max-age=0"
+    }
 
     info = None
     last_exception = None
 
-    for proxy in proxies:
-        opts = {
-            "format": "bestaudio/best",
-            "outtmpl": str(dst / "%(id)s.%(ext)s"),
-            "writesubtitles": True,
-            "writeautomaticsub": True,
-            "subtitleslangs": ["en"],
-            "subtitlesformat": "srt",
-            "writethumbnail": True,
-            "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "192"}],
-            "quiet": True,
-            "no_warnings": True,
-            "retries": 2, # yt-dlp internal retries
-            "socket_timeout": 30, # 30-second timeout
-        }
-
-        if "tiktok.com" in url.lower() or "instagram.com" in url.lower():
-            opts["http_headers"] = {
-                "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15",
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                "Accept-Language": "en-US,en;q=0.5",
+    # Try different approaches for Instagram
+    if "instagram.com" in url.lower():
+        approaches = [
+            # Approach 1: Standard with enhanced headers
+            {
+                "opts": {
+                    "format": "bestaudio/best",
+                    "outtmpl": str(dst / "%(id)s.%(ext)s"),
+                    "writesubtitles": True,
+                    "writeautomaticsub": True,
+                    "subtitleslangs": ["en"],
+                    "subtitlesformat": "srt",
+                    "writethumbnail": True,
+                    "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "192"}],
+                    "quiet": True,
+                    "no_warnings": True,
+                    "http_headers": enhanced_headers,
+                    "retries": 3,
+                    "fragment_retries": 3,
+                    "extractor_retries": 3,
+                    "sleep_interval": 2,
+                    "max_sleep_interval": 5,
+                    "ignoreerrors": False,
+                    "no_check_certificate": True,
+                },
+                "name": "standard"
+            },
+            # Approach 2: With cookies and different extractor args
+            {
+                "opts": {
+                    "format": "bestaudio/best",
+                    "outtmpl": str(dst / "%(id)s.%(ext)s"),
+                    "writesubtitles": True,
+                    "writeautomaticsub": True,
+                    "subtitleslangs": ["en"],
+                    "subtitlesformat": "srt",
+                    "writethumbnail": True,
+                    "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "192"}],
+                    "quiet": True,
+                    "no_warnings": True,
+                    "http_headers": enhanced_headers,
+                    "retries": 3,
+                    "fragment_retries": 3,
+                    "extractor_retries": 3,
+                    "sleep_interval": 3,
+                    "max_sleep_interval": 8,
+                    "ignoreerrors": False,
+                    "no_check_certificate": True,
+                    "extractor_args": {
+                        "instagram": {
+                            "login": None,
+                            "password": None,
+                        }
+                    }
+                },
+                "name": "with_extractor_args"
+            },
+            # Approach 3: Try with cookies from browser (if available)
+            {
+                "opts": {
+                    "format": "bestaudio/best",
+                    "outtmpl": str(dst / "%(id)s.%(ext)s"),
+                    "writesubtitles": True,
+                    "writeautomaticsub": True,
+                    "subtitleslangs": ["en"],
+                    "subtitlesformat": "srt",
+                    "writethumbnail": True,
+                    "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "192"}],
+                    "quiet": True,
+                    "no_warnings": True,
+                    "http_headers": enhanced_headers,
+                    "retries": 3,
+                    "fragment_retries": 3,
+                    "extractor_retries": 3,
+                    "sleep_interval": 5,
+                    "max_sleep_interval": 10,
+                    "ignoreerrors": False,
+                    "no_check_certificate": True,
+                    "cookiesfrombrowser": ("chrome",),  # Try to get cookies from Chrome
+                    "extractor_args": {
+                        "instagram": {
+                            "login": None,
+                            "password": None,
+                        }
+                    }
+                },
+                "name": "with_cookies"
             }
+        ]
+    else:
+        # For other platforms, use standard approach
+        approaches = [
+            {
+                "opts": {
+                    "format": "bestaudio/best",
+                    "outtmpl": str(dst / "%(id)s.%(ext)s"),
+                    "writesubtitles": True,
+                    "writeautomaticsub": True,
+                    "subtitleslangs": ["en"],
+                    "subtitlesformat": "srt",
+                    "writethumbnail": True,
+                    "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "192"}],
+                    "quiet": True,
+                    "no_warnings": True,
+                    "http_headers": enhanced_headers,
+                    "retries": 3,
+                    "fragment_retries": 3,
+                    "extractor_retries": 3,
+                    "sleep_interval": 1,
+                    "max_sleep_interval": 5,
+                    "ignoreerrors": False,
+                    "no_check_certificate": True,
+                },
+                "name": "standard"
+            }
+        ]
 
-        if proxy:
-            opts["proxy"] = proxy
-            # For proxies requiring authentication:
-            # opts["proxy"] = "user:pass@host:port"
-            print(f"Attempting download for {url} using proxy: {proxy}")
-        else:
-            print(f"Attempting download for {url} without proxy.")
+    for approach in approaches:
+        opts = approach["opts"]
+        approach_name = approach["name"]
+        
+        print(f"Attempting download for {url} using approach: {approach_name}")
+        
+        try:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(url, download=True)
+            # If successful, break the loop
+            print("Download successful.")
+            break
+        except Exception as e:
+            last_exception = e
+            print(f"Download attempt failed with approach {approach_name}. Error: {e}")
+            # Clear the destination directory for the next attempt
+            for item in dst.glob("*"):
+                if item.is_file():
+                    item.unlink()
+            continue
 
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
@@ -781,6 +897,11 @@ async def import_recipe(req: Request):
     link = (await req.json()).get("link", "").strip()
     if not link:
         raise HTTPException(400, "link is required")
+    
+    # Debug: Check environment variables
+    openai_key = os.getenv("OPENAI_API_KEY")
+    print(f"OpenAI API key present: {bool(openai_key)}")
+    print(f"OpenAI API key length: {len(openai_key) if openai_key else 0}")
 
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -788,13 +909,31 @@ async def import_recipe(req: Request):
             return {"success": True, "recipe": recipe, "source": "yt_dlp"}
     except Exception as e:
         print(f"Full yt-dlp process failed for {link}. Error: {e}")
-        # Optionally log traceback for more detail
+        # Log detailed traceback for debugging
         import traceback
+        print("=== FULL TRACEBACK ===")
         traceback.print_exc()
+        print("=== END TRACEBACK ===")
         print("Falling back to basic scrape…")
         try:
-            async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client_:
-                resp = await client_.get(link, headers={"User-Agent": "Mozilla/5.0"})
+            # Enhanced headers for fallback scraping
+            fallback_headers = {
+                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.9",
+                "Accept-Encoding": "gzip, deflate, br",
+                "DNT": "1",
+                "Connection": "keep-alive",
+                "Upgrade-Insecure-Requests": "1",
+                "Sec-Fetch-Dest": "document",
+                "Sec-Fetch-Mode": "navigate",
+                "Sec-Fetch-Site": "none",
+                "Sec-Fetch-User": "?1",
+                "Cache-Control": "max-age=0"
+            }
+            
+            async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client_:
+                resp = await client_.get(link, headers=fallback_headers)
                 resp.raise_for_status()
                 html = resp.text
 
