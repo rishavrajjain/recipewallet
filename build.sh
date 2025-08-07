@@ -6,6 +6,7 @@ set -o errexit
 
 # 1. Install Python dependencies
 pip install -r requirements.txt
+pip install --upgrade yt-dlp
 
 # 2. Install ffmpeg using sudo for permissions
 echo "Installing ffmpeg..."

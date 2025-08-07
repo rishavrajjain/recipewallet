@@ -315,28 +315,68 @@ class HealthAnalysisResponse(BaseModel):
 # ----------------- Core Logic -----------------
 def run_yt_dlp(url: str, dst: Path) -> dict:
     out = dict(audio=None, subs=None, thumb=None, caption="", thumbnail_url="", platform="", creator_handle="", creator_name="")
-    opts = {
-        "format": "bestaudio/best",
-        "outtmpl": str(dst / "%(id)s.%(ext)s"),
-        "writesubtitles": True,
-        "writeautomaticsub": True,
-        "subtitleslangs": ["en"],
-        "subtitlesformat": "srt",
-        "writethumbnail": True,
-        "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "192"}],
-        "quiet": True,
-        "no_warnings": True
-    }
 
-    if "tiktok.com" in url.lower() or "instagram.com" in url.lower():
-        opts["http_headers"] = {
-            "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.5",
+    # List of proxies to try
+    proxies = [
+        None,  # First attempt with no proxy
+        "http://proxy.zenrows.com:8001",
+        # Add more proxies here if needed
+    ]
+
+    info = None
+    last_exception = None
+
+    for proxy in proxies:
+        opts = {
+            "format": "bestaudio/best",
+            "outtmpl": str(dst / "%(id)s.%(ext)s"),
+            "writesubtitles": True,
+            "writeautomaticsub": True,
+            "subtitleslangs": ["en"],
+            "subtitlesformat": "srt",
+            "writethumbnail": True,
+            "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "192"}],
+            "quiet": True,
+            "no_warnings": True,
+            "retries": 2, # yt-dlp internal retries
+            "socket_timeout": 30, # 30-second timeout
         }
 
-    with yt_dlp.YoutubeDL(opts) as ydl:
-        info = ydl.extract_info(url, download=True)
+        if "tiktok.com" in url.lower() or "instagram.com" in url.lower():
+            opts["http_headers"] = {
+                "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.5",
+            }
+
+        if proxy:
+            opts["proxy"] = proxy
+            # For proxies requiring authentication:
+            # opts["proxy"] = "user:pass@host:port"
+            print(f"Attempting download for {url} using proxy: {proxy}")
+        else:
+            print(f"Attempting download for {url} without proxy.")
+
+        try:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(url, download=True)
+            # If successful, break the loop
+            print("Download successful.")
+            break
+        except Exception as e:
+            last_exception = e
+            print(f"Download attempt failed. Error: {e}")
+            # Clear the destination directory for the next attempt
+            for item in dst.glob("*"):
+                if item.is_file():
+                    item.unlink()
+            continue
+
+    if info is None:
+        if last_exception:
+            raise last_exception
+        else:
+            raise Exception("yt-dlp failed for unknown reasons.")
 
     base = dst / info["id"]
     out["audio"] = next(base.parent.glob(f"{info['id']}.mp3"), None)
@@ -747,7 +787,11 @@ async def import_recipe(req: Request):
             recipe = await asyncio.to_thread(_extract_recipe_from_url_sync, link, tmpdir)
             return {"success": True, "recipe": recipe, "source": "yt_dlp"}
     except Exception as e:
-        print(f"yt_dlp failed: {e}. Falling back to basic scrape…")
+        print(f"Full yt-dlp process failed for {link}. Error: {e}")
+        # Optionally log traceback for more detail
+        import traceback
+        traceback.print_exc()
+        print("Falling back to basic scrape…")
         try:
             async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client_:
                 resp = await client_.get(link, headers={"User-Agent": "Mozilla/5.0"})
