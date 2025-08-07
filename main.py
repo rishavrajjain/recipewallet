@@ -927,19 +927,45 @@ async def import_recipe(req: Request):
                 "Cache-Control": "max-age=0"
             }
             
+            print("Attempting fallback scraping with enhanced headers...")
             async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client_:
                 resp = await client_.get(link, headers=fallback_headers)
                 resp.raise_for_status()
                 html = resp.text
+                print(f"Fallback scraping successful. HTML length: {len(html)}")
 
             import html as html_lib
             thumb_match = re.search(r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']', html, re.IGNORECASE)
             fallback_thumb = html_lib.unescape(thumb_match.group(1)) if thumb_match else ""
             desc_match = re.search(r'<meta[^>]+property=["\']og:description["\'][^>]+content=["\']([^"\']+)["\']', html, re.IGNORECASE)
             caption = html_lib.unescape(desc_match.group(1)) if desc_match else "Could not extract description."
+            
+            print(f"Extracted thumbnail: {bool(fallback_thumb)}")
+            print(f"Extracted description: {len(caption)} chars")
 
             if "instagram.com" in link.lower():
                 platform = "instagram"
+                # Try to extract more Instagram-specific information
+                try:
+                    # Look for Instagram-specific patterns in HTML
+                    instagram_patterns = [
+                        r'"caption":"([^"]+)"',
+                        r'"text":"([^"]+)"',
+                        r'<meta[^>]+property=["\']og:title["\'][^>]+content=["\']([^"\']+)["\']',
+                        r'<title[^>]*>([^<]+)</title>'
+                    ]
+                    
+                    for pattern in instagram_patterns:
+                        matches = re.findall(pattern, html, re.IGNORECASE)
+                        if matches:
+                            additional_text = " ".join(matches[:3])  # Take first 3 matches
+                            caption = f"{caption} {additional_text}".strip()
+                            print(f"Found additional Instagram content: {len(additional_text)} chars")
+                            break
+                            
+                except Exception as e:
+                    print(f"Instagram-specific extraction failed: {e}")
+                    
             elif "tiktok.com" in link.lower():
                 platform = "tiktok"
             elif "youtube.com" in link.lower() or "youtu.be" in link.lower():
@@ -948,6 +974,7 @@ async def import_recipe(req: Request):
                 platform = "website"
 
             handle = public_oembed_handle_sync(link) or graph_oembed_handle_sync(link) or scrape_instagram_page_handle_sync(link)
+            print(f"Extracted handle: {handle}")
 
             recipe = extract_recipe(caption, "", "", fallback_thumb, platform, handle, "", link)
             return {"success": True, "recipe": recipe, "source": "fallback", "warning": "Used fallback extraction."}
