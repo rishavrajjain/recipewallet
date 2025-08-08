@@ -7,3 +7,9 @@ services:
     envVars:
       - key: OPENAI_API_KEY
         sync: false  # You'll set this in Render dashboard
+      - key: ENVIRONMENT
+        value: production
+      - key: PROXY_URLS
+        sync: false  # Comma-separated proxy URLs like http://user:pass@host:port
+      - key: INSTAGRAM_SESSIONID
+        sync: false  # Instagram session cookie for authenticated access

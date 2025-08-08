@@ -11,7 +11,7 @@ from enum import Enum
 
 import yt_dlp, pysrt, aiofiles
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.exception_handlers import request_validation_exception_handler
@@ -331,16 +331,53 @@ def run_yt_dlp(url: str, dst: Path) -> dict:
         "Sec-Fetch-User": "?1",
         "Cache-Control": "max-age=0"
     }
-
+    
+    # Check if we're in production environment
+    is_production = os.getenv("RENDER", "false").lower() == "true" or os.getenv("ENVIRONMENT", "").lower() == "production"
+    
+    # Rotating proxy list for production only (configure via PROXY_URLS env var)
+    proxy_list = []
+    proxies_from_env = os.getenv("PROXY_URLS", "").strip()
+    if is_production:
+        if proxies_from_env:
+            proxy_values = [p.strip() for p in proxies_from_env.split(",") if p.strip()]
+            proxy_list = [None] + proxy_values
+            print(f"Production environment detected - using proxy rotation with {len(proxy_values)} proxies")
+        else:
+            proxy_list = [None]
+            print("Production environment detected - NO PROXY_URLS configured; proceeding without proxies (may hit rate limits)")
+    else:
+        proxy_list = [None]  # Local environment - no proxies
+        print("Local environment detected - no proxy rotation")
+    
+    # Optional: Instagram session cookies via env var (improves success rate if login is required)
+    cookies_path = None
+    if "instagram.com" in url.lower():
+        sessionid = os.getenv("INSTAGRAM_SESSIONID", "").strip()
+        if sessionid:
+            try:
+                cookies_path = str(dst / "instagram_cookies.txt")
+                expiry = int(time.time()) + 3600 * 24 * 365  # 1 year
+                with open(cookies_path, "w") as f:
+                    f.write("# Netscape HTTP Cookie File\n")
+                    # domain, include_subdomains, path, secure, expiry, name, value
+                    f.write(f".instagram.com\tTRUE\t/\tTRUE\t{expiry}\tsessionid\t{sessionid}\n")
+                print("Instagram session cookie configured from INSTAGRAM_SESSIONID")
+            except Exception as e:
+                print(f"Failed to write Instagram cookies file: {e}")
+    
     info = None
     last_exception = None
 
-    # Try different approaches for Instagram
+    # Try different approaches for Instagram with proxy rotation (production only)
     if "instagram.com" in url.lower():
-        approaches = [
-            # Approach 1: Metadata only (no download) - for production testing
-            {
-                "opts": {
+        approaches = []
+        
+        if is_production:
+            # Production: Create approaches with different proxies
+            for i, proxy in enumerate(proxy_list[:5]):  # Use first 5 proxies
+                # Approach 1: Metadata only with proxy
+                opts_meta = {
                     "skip_download": True,  # Don't download the video
                     "writethumbnail": True,
                     "quiet": True,
@@ -353,12 +390,14 @@ def run_yt_dlp(url: str, dst: Path) -> dict:
                     "max_sleep_interval": 5,
                     "ignoreerrors": False,
                     "no_check_certificate": True,
-                },
-                "name": "metadata_only"
-            },
-            # Approach 2: Standard with enhanced headers
-            {
-                "opts": {
+                    "proxy": proxy,
+                }
+                if cookies_path:
+                    opts_meta["cookiefile"] = cookies_path
+                approaches.append({"opts": opts_meta, "name": f"metadata_only_proxy_{i}"})
+                
+                # Approach 2: Standard with proxy
+                opts_std = {
                     "format": "bestaudio/best",
                     "outtmpl": str(dst / "%(id)s.%(ext)s"),
                     "writesubtitles": True,
@@ -377,40 +416,55 @@ def run_yt_dlp(url: str, dst: Path) -> dict:
                     "max_sleep_interval": 5,
                     "ignoreerrors": False,
                     "no_check_certificate": True,
-                },
-                "name": "standard"
-            },
-            # Approach 3: With extractor args but no cookies
-            {
-                "opts": {
-                    "format": "bestaudio/best",
-                    "outtmpl": str(dst / "%(id)s.%(ext)s"),
-                    "writesubtitles": True,
-                    "writeautomaticsub": True,
-                    "subtitleslangs": ["en"],
-                    "subtitlesformat": "srt",
-                    "writethumbnail": True,
-                    "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "192"}],
-                    "quiet": True,
-                    "no_warnings": True,
-                    "http_headers": enhanced_headers,
-                    "retries": 3,
-                    "fragment_retries": 3,
-                    "extractor_retries": 3,
-                    "sleep_interval": 3,
-                    "max_sleep_interval": 8,
-                    "ignoreerrors": False,
-                    "no_check_certificate": True,
-                    "extractor_args": {
-                        "instagram": {
-                            "login": None,
-                            "password": None,
-                        }
-                    }
-                },
-                "name": "with_extractor_args"
+                    "proxy": proxy,
+                }
+                if cookies_path:
+                    opts_std["cookiefile"] = cookies_path
+                approaches.append({"opts": opts_std, "name": f"standard_proxy_{i}"})
+        else:
+            # Local: Use standard approaches without proxies
+            opts_meta = {
+                "skip_download": True,
+                "writethumbnail": True,
+                "quiet": True,
+                "no_warnings": True,
+                "http_headers": enhanced_headers,
+                "retries": 3,
+                "fragment_retries": 3,
+                "extractor_retries": 3,
+                "sleep_interval": 2,
+                "max_sleep_interval": 5,
+                "ignoreerrors": False,
+                "no_check_certificate": True,
             }
-        ]
+            if cookies_path:
+                opts_meta["cookiefile"] = cookies_path
+            opts_std = {
+                "format": "bestaudio/best",
+                "outtmpl": str(dst / "%(id)s.%(ext)s"),
+                "writesubtitles": True,
+                "writeautomaticsub": True,
+                "subtitleslangs": ["en"],
+                "subtitlesformat": "srt",
+                "writethumbnail": True,
+                "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "192"}],
+                "quiet": True,
+                "no_warnings": True,
+                "http_headers": enhanced_headers,
+                "retries": 3,
+                "fragment_retries": 3,
+                "extractor_retries": 3,
+                "sleep_interval": 2,
+                "max_sleep_interval": 5,
+                "ignoreerrors": False,
+                "no_check_certificate": True,
+            }
+            if cookies_path:
+                opts_std["cookiefile"] = cookies_path
+            approaches = [
+                {"opts": opts_meta, "name": "metadata_only"},
+                {"opts": opts_std, "name": "standard"}
+            ]
     else:
         # For other platforms, use standard approach
         approaches = [
@@ -443,7 +497,8 @@ def run_yt_dlp(url: str, dst: Path) -> dict:
         opts = approach["opts"]
         approach_name = approach["name"]
         
-        print(f"Attempting download for {url} using approach: {approach_name}")
+        proxy_info = opts.get("proxy", "None")
+        print(f"Attempting download for {url} using approach: {approach_name} with proxy: {proxy_info}")
         
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
@@ -887,6 +942,11 @@ def _extract_recipe_from_url_sync(link: str, tmpdir: str) -> Dict:
 async def health():
     return {"status": "ok", "timestamp": datetime.now().isoformat()}
 
+# Add HEAD handler for health checks (some load balancers use HEAD)
+@app.head("/health")
+async def health_head():
+    return Response(status_code=200)
+
 @app.post("/import-recipe")
 async def import_recipe(req: Request):
     link = (await req.json()).get("link", "").strip()
@@ -927,8 +987,23 @@ async def import_recipe(req: Request):
                 "Cache-Control": "max-age=0"
             }
             
+            # Use proxy for fallback scraping in production if available
+            is_production = os.getenv("RENDER", "false").lower() == "true" or os.getenv("ENVIRONMENT", "").lower() == "production"
+            proxies = None
+            selected_proxy = None
+            if is_production:
+                proxies_from_env = os.getenv("PROXY_URLS", "").strip()
+                if proxies_from_env:
+                    proxy_values = [p.strip() for p in proxies_from_env.split(",") if p.strip()]
+                    if proxy_values:
+                        selected_proxy = random.choice(proxy_values)
+                        proxies = {"http": selected_proxy, "https": selected_proxy}
+                        print(f"Fallback scraping will use proxy: {selected_proxy}")
+                else:
+                    print("Fallback scraping: PROXY_URLS not set; proceeding without proxy")
+            
             print("Attempting fallback scraping with enhanced headers...")
-            async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client_:
+            async with httpx.AsyncClient(timeout=30, follow_redirects=True, proxies=proxies) as client_:
                 resp = await client_.get(link, headers=fallback_headers)
                 resp.raise_for_status()
                 html = resp.text
