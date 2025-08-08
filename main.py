@@ -57,6 +57,17 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 
 app.mount("/images", StaticFiles(directory=USER_UPLOADS_DIR), name="images")
 
+def mask_proxy(p: Optional[str]) -> str:
+    if not p:
+        return "None"
+    try:
+        u = urllib.parse.urlparse(p)
+        host = u.hostname or ""
+        port = f":{u.port}" if u.port else ""
+        return f"{u.scheme}://***:***@{host}{port}"
+    except Exception:
+        return "***"
+
 # ----------------- Instagram handle extraction utilities -----------------
 
 _ALLOWED = re.compile(r"^[a-z0-9._]{2,30}$")
@@ -498,7 +509,7 @@ def run_yt_dlp(url: str, dst: Path) -> dict:
         approach_name = approach["name"]
         
         proxy_info = opts.get("proxy", "None")
-        print(f"Attempting download for {url} using approach: {approach_name} with proxy: {proxy_info}")
+        print(f"Attempting download for {url} using approach: {approach_name} with proxy: {mask_proxy(proxy_info if isinstance(proxy_info, str) else None)}")
         
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
@@ -998,7 +1009,7 @@ async def import_recipe(req: Request):
                     if proxy_values:
                         selected_proxy = random.choice(proxy_values)
                         proxies = {"http": selected_proxy, "https": selected_proxy}
-                        print(f"Fallback scraping will use proxy: {selected_proxy}")
+                        print(f"Fallback scraping will use proxy: {mask_proxy(selected_proxy)}")
                 else:
                     print("Fallback scraping: PROXY_URLS not set; proceeding without proxy")
             
