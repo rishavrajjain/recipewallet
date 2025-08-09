@@ -476,6 +476,65 @@ def run_yt_dlp(url: str, dst: Path) -> dict:
                 {"opts": opts_meta, "name": "metadata_only"},
                 {"opts": opts_std, "name": "standard"}
             ]
+    elif "tiktok.com" in url.lower():
+        # TikTok: try mobile UA and extractor args, rotate proxies in production
+        tiktok_headers = {
+            **enhanced_headers,
+            "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
+            "Referer": "https://www.tiktok.com/",
+        }
+        def base_opts_common():
+            return {
+                "format": "bestaudio/best",
+                "outtmpl": str(dst / "%(id)s.%(ext)s"),
+                "writesubtitles": True,
+                "writeautomaticsub": True,
+                "subtitleslangs": ["en"],
+                "subtitlesformat": "srt",
+                "writethumbnail": True,
+                "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "192"}],
+                "quiet": True,
+                "no_warnings": True,
+                "http_headers": tiktok_headers,
+                "retries": 3,
+                "fragment_retries": 3,
+                "extractor_retries": 3,
+                "sleep_interval": 1,
+                "max_sleep_interval": 5,
+                "ignoreerrors": False,
+                "no_check_certificate": True,
+                # Prefer mobile API via extractor_args
+                "extractor_args": {
+                    "tiktok": {
+                        "app_name": ["musically_go"],
+                        "manifest_app_version": ["370"],
+                        "api_hostname": ["api22-normal-c-useast2a.tiktokv.com"],
+                    }
+                },
+            }
+        approaches = []
+        proxies_to_try = proxy_list[:5] if is_production else [None]
+        for i, proxy in enumerate(proxies_to_try):
+            opts_std = base_opts_common()
+            if proxy:
+                opts_std["proxy"] = proxy
+            approaches.append({"opts": opts_std, "name": f"standard{'_proxy_' + str(i) if proxy else ''}"})
+            # Secondary approach: metadata-only as a quick fallback
+            opts_meta = {
+                "skip_download": True,
+                "writethumbnail": True,
+                "quiet": True,
+                "no_warnings": True,
+                "http_headers": tiktok_headers,
+                "retries": 2,
+                "fragment_retries": 2,
+                "extractor_retries": 2,
+                "ignoreerrors": False,
+                "no_check_certificate": True,
+            }
+            if proxy:
+                opts_meta["proxy"] = proxy
+            approaches.append({"opts": opts_meta, "name": f"metadata_only{'_proxy_' + str(i) if proxy else ''}"})
     else:
         # For other platforms, use standard approach
         approaches = [
