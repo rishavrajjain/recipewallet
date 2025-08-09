@@ -1014,11 +1014,30 @@ async def import_recipe(req: Request):
                     print("Fallback scraping: PROXY_URLS not set; proceeding without proxy")
             
             print("Attempting fallback scraping with enhanced headers...")
-            async with httpx.AsyncClient(timeout=30, follow_redirects=True, proxies=proxies) as client_:
-                resp = await client_.get(link, headers=fallback_headers)
-                resp.raise_for_status()
-                html = resp.text
-                print(f"Fallback scraping successful. HTML length: {len(html)}")
+            # Be compatible across httpx versions: some do not accept 'proxies' on AsyncClient
+            html = ""
+            try:
+                if proxies is not None:
+                    async with httpx.AsyncClient(timeout=30, follow_redirects=True, proxies=proxies) as client_:
+                        resp = await client_.get(link, headers=fallback_headers)
+                        resp.raise_for_status()
+                        html = resp.text
+                else:
+                    async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client_:
+                        resp = await client_.get(link, headers=fallback_headers)
+                        resp.raise_for_status()
+                        html = resp.text
+            except TypeError as e:
+                # Older httpx versions: fall back to transport-level proxy
+                if "unexpected keyword argument 'proxies'" in str(e):
+                    transport = httpx.AsyncHTTPTransport(proxy=selected_proxy) if selected_proxy else None
+                    async with httpx.AsyncClient(timeout=30, follow_redirects=True, transport=transport) as client_:
+                        resp = await client_.get(link, headers=fallback_headers)
+                        resp.raise_for_status()
+                        html = resp.text
+                else:
+                    raise
+            print(f"Fallback scraping successful. HTML length: {len(html)}")
 
             import html as html_lib
             thumb_match = re.search(r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']', html, re.IGNORECASE)
