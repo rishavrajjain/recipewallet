@@ -503,6 +503,7 @@ def run_yt_dlp(url: str, dst: Path) -> dict:
                 "max_sleep_interval": 5,
                 "ignoreerrors": False,
                 "no_check_certificate": True,
+                "legacy_server_connect": True,  # Fix for SSL EOF errors with TikTok
                 # Prefer mobile API via extractor_args
                 "extractor_args": {
                     "tiktok": {
