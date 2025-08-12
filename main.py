@@ -352,7 +352,7 @@ def run_yt_dlp(url: str, dst: Path) -> dict:
     if is_production:
         if proxies_from_env:
             proxy_values = [p.strip() for p in proxies_from_env.split(",") if p.strip()]
-            proxy_list = [None] + proxy_values
+            proxy_list = proxy_values
             print(f"Production environment detected - using proxy rotation with {len(proxy_values)} proxies")
         else:
             proxy_list = [None]
@@ -396,6 +396,22 @@ def run_yt_dlp(url: str, dst: Path) -> dict:
     
     info = None
     last_exception = None
+
+    # Normalize TikTok shortlinks and redirectors
+    try:
+        if "vm.tiktok.com" in url.lower():
+            # Resolve shortlink quickly without downloading content
+            import urllib.request
+            req = urllib.request.Request(url, method="HEAD")
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                final_url = resp.geturl()
+                if final_url:
+                    url = final_url
+        # Ensure canonical web URL (avoid m.tiktok.com) so extractor matches
+        if "tiktok.com" in url.lower() and url.startswith("http://"):
+            url = url.replace("http://", "https://", 1)
+    except Exception:
+        pass
 
     # Try different approaches for Instagram with proxy rotation (production only)
     if "instagram.com" in url.lower():
