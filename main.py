@@ -500,11 +500,28 @@ def run_yt_dlp(url: str, dst: Path) -> dict:
         if is_production:
             # Production: Create approaches with different proxies
             for i, proxy in enumerate(proxy_list[:5]):  # Use first 5 proxies
-                # Mobile headers for TikTok
+                # Mobile headers for TikTok with rotation
+                mobile_user_agents = [
+                    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
+                    "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1",
+                    "Mozilla/5.0 (Linux; Android 13; SM-G991B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
+                    "Mozilla/5.0 (Linux; Android 12; Pixel 6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Mobile Safari/537.36",
+                ]
+                selected_ua = mobile_user_agents[i % len(mobile_user_agents)]
                 tiktok_headers = {
                     **enhanced_headers,
-                    "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
+                    "User-Agent": selected_ua,
                     "Referer": "https://www.tiktok.com/",
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+                    "Accept-Language": "en-US,en;q=0.5",
+                    "Accept-Encoding": "gzip, deflate, br",
+                    "DNT": "1",
+                    "Connection": "keep-alive",
+                    "Upgrade-Insecure-Requests": "1",
+                    "Sec-Fetch-Dest": "document",
+                    "Sec-Fetch-Mode": "navigate",
+                    "Sec-Fetch-Site": "none",
+                    "Sec-Fetch-User": "?1",
                 }
                 
                 # Approach 1: Metadata only with mobile headers and proxy
@@ -1175,8 +1192,8 @@ async def import_recipe(req: Request):
                 else:
                     async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client_:
                         resp = await client_.get(link, headers=fallback_headers)
-                        resp.raise_for_status()
-                        html = resp.text
+                resp.raise_for_status()
+                html = resp.text
             except TypeError as e:
                 if "unexpected keyword argument 'proxies'" in str(e):
                     # Fallback for older httpx versions
