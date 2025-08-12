@@ -397,19 +397,21 @@ def run_yt_dlp(url: str, dst: Path) -> dict:
     info = None
     last_exception = None
 
-    # Normalize TikTok shortlinks and redirectors
+    # Normalize TikTok URLs
     try:
-        if "vm.tiktok.com" in url.lower():
-            # Resolve shortlink quickly without downloading content
-            import urllib.request
-            req = urllib.request.Request(url, method="HEAD")
-            with urllib.request.urlopen(req, timeout=5) as resp:
-                final_url = resp.geturl()
-                if final_url:
-                    url = final_url
-        # Ensure canonical web URL (avoid m.tiktok.com) so extractor matches
-        if "tiktok.com" in url.lower() and url.startswith("http://"):
-            url = url.replace("http://", "https://", 1)
+        if "tiktok.com" in url.lower():
+            # Upgrade to https
+            if url.startswith("http://"):
+                url = url.replace("http://", "https://", 1)
+            # Strip tracking query for canonicalization
+            from urllib.parse import urlparse, urlunparse
+            parsed = urlparse(url)
+            if parsed.netloc in {"tiktok.com", "m.tiktok.com"}:
+                netloc = "www.tiktok.com"
+            else:
+                netloc = parsed.netloc
+            if "/video/" in parsed.path:
+                url = urlunparse((parsed.scheme, netloc, parsed.path, "", "", ""))
     except Exception:
         pass
 
@@ -554,6 +556,8 @@ def run_yt_dlp(url: str, dst: Path) -> dict:
                     "max_sleep_interval": 5,
                     "ignoreerrors": False,
                     "no_check_certificate": True,
+                    "impersonate": "safari17",
+                    "socket_timeout": 30,
                     "proxy": proxy,
                     "extractor_args": {
                         "tiktok": {
@@ -587,6 +591,8 @@ def run_yt_dlp(url: str, dst: Path) -> dict:
                     "max_sleep_interval": 5,
                     "ignoreerrors": False,
                     "no_check_certificate": True,
+                    "impersonate": "safari17",
+                    "socket_timeout": 30,
                     "proxy": proxy,
                     "extractor_args": {
                         "tiktok": {
@@ -620,6 +626,8 @@ def run_yt_dlp(url: str, dst: Path) -> dict:
                 "max_sleep_interval": 5,
                 "ignoreerrors": False,
                 "no_check_certificate": True,
+                "impersonate": "safari17",
+                "socket_timeout": 30,
                 "extractor_args": {
                     "tiktok": {
                         "app_name": ["musically_go", "trill"],
@@ -647,6 +655,8 @@ def run_yt_dlp(url: str, dst: Path) -> dict:
                 "max_sleep_interval": 5,
                 "ignoreerrors": False,
                 "no_check_certificate": True,
+                "impersonate": "safari17",
+                "socket_timeout": 30,
                 "extractor_args": {
                     "tiktok": {
                         "app_name": ["musically_go", "trill"],
