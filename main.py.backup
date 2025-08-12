@@ -361,7 +361,7 @@ def run_yt_dlp(url: str, dst: Path) -> dict:
         proxy_list = [None]  # Local environment - no proxies
         print("Local environment detected - no proxy rotation")
     
-    # Optional: Session cookies via env vars (improves success rate if login is required)
+    # Optional: Instagram session cookies via env var (improves success rate if login is required)
     cookies_path = None
     if "instagram.com" in url.lower():
         sessionid = os.getenv("INSTAGRAM_SESSIONID", "").strip()
@@ -376,23 +376,6 @@ def run_yt_dlp(url: str, dst: Path) -> dict:
                 print("Instagram session cookie configured from INSTAGRAM_SESSIONID")
             except Exception as e:
                 print(f"Failed to write Instagram cookies file: {e}")
-    elif "tiktok.com" in url.lower():
-        tiktok_sessionid = os.getenv("TIKTOK_SESSIONID", "").strip()
-        tiktok_webid = os.getenv("TIKTOK_WEBID", "").strip()
-        if tiktok_sessionid or tiktok_webid:
-            try:
-                cookies_path = str(dst / "tiktok_cookies.txt")
-                expiry = int(time.time()) + 3600 * 24 * 365  # 1 year
-                with open(cookies_path, "w") as f:
-                    f.write("# Netscape HTTP Cookie File\n")
-                    # domain, include_subdomains, path, secure, expiry, name, value
-                    if tiktok_sessionid:
-                        f.write(f".tiktok.com\tTRUE\t/\tTRUE\t{expiry}\tsessionid\t{tiktok_sessionid}\n")
-                    if tiktok_webid:
-                        f.write(f".tiktok.com\tTRUE\t/\tTRUE\t{expiry}\twebid\t{tiktok_webid}\n")
-                print(f"TikTok session cookies configured (sessionid: {bool(tiktok_sessionid)}, webid: {bool(tiktok_webid)})")
-            except Exception as e:
-                print(f"Failed to write TikTok cookies file: {e}")
     
     info = None
     last_exception = None
@@ -426,15 +409,15 @@ def run_yt_dlp(url: str, dst: Path) -> dict:
                 
                 # Approach 2: Standard with proxy
                 opts_std = {
-        "format": "bestaudio/best",
-        "outtmpl": str(dst / "%(id)s.%(ext)s"),
-        "writesubtitles": True,
-        "writeautomaticsub": True,
-        "subtitleslangs": ["en"],
-        "subtitlesformat": "srt",
-        "writethumbnail": True,
-        "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "192"}],
-        "quiet": True,
+                    "format": "bestaudio/best",
+                    "outtmpl": str(dst / "%(id)s.%(ext)s"),
+                    "writesubtitles": True,
+                    "writeautomaticsub": True,
+                    "subtitleslangs": ["en"],
+                    "subtitlesformat": "srt",
+                    "writethumbnail": True,
+                    "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "192"}],
+                    "quiet": True,
                     "no_warnings": True,
                     "http_headers": enhanced_headers,
                     "retries": 3,
@@ -492,142 +475,6 @@ def run_yt_dlp(url: str, dst: Path) -> dict:
             approaches = [
                 {"opts": opts_meta, "name": "metadata_only"},
                 {"opts": opts_std, "name": "standard"}
-            ]
-    elif "tiktok.com" in url.lower():
-        # TikTok: Use mobile headers and extractor args with proxy rotation
-        approaches = []
-        
-        if is_production:
-            # Production: Create approaches with different proxies
-            for i, proxy in enumerate(proxy_list[:5]):  # Use first 5 proxies
-                # Mobile headers for TikTok
-                tiktok_headers = {
-                    **enhanced_headers,
-                    "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
-                    "Referer": "https://www.tiktok.com/",
-                }
-                
-                # Approach 1: Metadata only with mobile headers and proxy
-                opts_meta = {
-                    "skip_download": True,
-                    "writethumbnail": True,
-                    "quiet": True,
-                    "no_warnings": True,
-                    "http_headers": tiktok_headers,
-                    "retries": 3,
-                    "fragment_retries": 3,
-                    "extractor_retries": 3,
-                    "sleep_interval": 2,
-                    "max_sleep_interval": 5,
-                    "ignoreerrors": False,
-                    "no_check_certificate": True,
-                    "proxy": proxy,
-                    "extractor_args": {
-                        "tiktok": {
-                            "app_name": ["musically_go", "trill"],
-                            "manifest_app_version": ["370", "340"],
-                            "api_hostname": ["api22-normal-c-useast2a.tiktokv.com"],
-                        }
-                    },
-                }
-                if cookies_path:
-                    opts_meta["cookiefile"] = cookies_path
-                approaches.append({"opts": opts_meta, "name": f"tiktok_metadata_proxy_{i}"})
-                
-                # Approach 2: Standard with mobile headers and proxy
-                opts_std = {
-                    "format": "bestaudio/best",
-                    "outtmpl": str(dst / "%(id)s.%(ext)s"),
-                    "writesubtitles": True,
-                    "writeautomaticsub": True,
-                    "subtitleslangs": ["en"],
-                    "subtitlesformat": "srt",
-                    "writethumbnail": True,
-                    "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "192"}],
-                    "quiet": True,
-                    "no_warnings": True,
-                    "http_headers": tiktok_headers,
-                    "retries": 3,
-                    "fragment_retries": 3,
-                    "extractor_retries": 3,
-                    "sleep_interval": 2,
-                    "max_sleep_interval": 5,
-                    "ignoreerrors": False,
-                    "no_check_certificate": True,
-                    "proxy": proxy,
-                    "extractor_args": {
-                        "tiktok": {
-                            "app_name": ["musically_go", "trill"],
-                            "manifest_app_version": ["370", "340"],
-                            "api_hostname": ["api22-normal-c-useast2a.tiktokv.com"],
-                        }
-                    },
-                }
-                if cookies_path:
-                    opts_std["cookiefile"] = cookies_path
-                approaches.append({"opts": opts_std, "name": f"tiktok_standard_proxy_{i}"})
-        else:
-            # Local: Use standard approaches without proxies
-            tiktok_headers = {
-                **enhanced_headers,
-                "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
-                "Referer": "https://www.tiktok.com/",
-            }
-            
-            opts_meta = {
-                "skip_download": True,
-                "writethumbnail": True,
-                "quiet": True,
-                "no_warnings": True,
-                "http_headers": tiktok_headers,
-                "retries": 3,
-                "fragment_retries": 3,
-                "extractor_retries": 3,
-                "sleep_interval": 2,
-                "max_sleep_interval": 5,
-                "ignoreerrors": False,
-                "no_check_certificate": True,
-                "extractor_args": {
-                    "tiktok": {
-                        "app_name": ["musically_go", "trill"],
-                        "manifest_app_version": ["370", "340"],
-                        "api_hostname": ["api22-normal-c-useast2a.tiktokv.com"],
-                    }
-                },
-            }
-            opts_std = {
-                "format": "bestaudio/best",
-                "outtmpl": str(dst / "%(id)s.%(ext)s"),
-                "writesubtitles": True,
-                "writeautomaticsub": True,
-                "subtitleslangs": ["en"],
-                "subtitlesformat": "srt",
-                "writethumbnail": True,
-                "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "192"}],
-                "quiet": True,
-                "no_warnings": True,
-                "http_headers": tiktok_headers,
-                "retries": 3,
-                "fragment_retries": 3,
-                "extractor_retries": 3,
-                "sleep_interval": 2,
-                "max_sleep_interval": 5,
-                "ignoreerrors": False,
-                "no_check_certificate": True,
-                "extractor_args": {
-                    "tiktok": {
-                        "app_name": ["musically_go", "trill"],
-                        "manifest_app_version": ["370", "340"],
-                        "api_hostname": ["api22-normal-c-useast2a.tiktokv.com"],
-                    }
-                },
-            }
-            if cookies_path:
-                opts_meta["cookiefile"] = cookies_path
-                opts_std["cookiefile"] = cookies_path
-            approaches = [
-                {"opts": opts_meta, "name": "tiktok_metadata"},
-                {"opts": opts_std, "name": "tiktok_standard"}
             ]
     else:
         # For other platforms, use standard approach
@@ -1167,27 +1014,11 @@ async def import_recipe(req: Request):
                     print("Fallback scraping: PROXY_URLS not set; proceeding without proxy")
             
             print("Attempting fallback scraping with enhanced headers...")
-            # Handle httpx version compatibility for proxies
-            try:
-                if proxies is not None:
-                    async with httpx.AsyncClient(timeout=30, follow_redirects=True, proxies=proxies) as client_:
-                        resp = await client_.get(link, headers=fallback_headers)
-                else:
-                    async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client_:
-                        resp = await client_.get(link, headers=fallback_headers)
-                        resp.raise_for_status()
-                        html = resp.text
-            except TypeError as e:
-                if "unexpected keyword argument 'proxies'" in str(e):
-                    # Fallback for older httpx versions
-                    transport = httpx.AsyncHTTPTransport(proxy=selected_proxy) if selected_proxy else None
-                    async with httpx.AsyncClient(timeout=30, follow_redirects=True, transport=transport) as client_:
-                        resp = await client_.get(link, headers=fallback_headers)
-                        resp.raise_for_status()
-                        html = resp.text
-                else:
-                    raise
-            print(f"Fallback scraping successful. HTML length: {len(html)}")
+            async with httpx.AsyncClient(timeout=30, follow_redirects=True, proxies=proxies) as client_:
+                resp = await client_.get(link, headers=fallback_headers)
+                resp.raise_for_status()
+                html = resp.text
+                print(f"Fallback scraping successful. HTML length: {len(html)}")
 
             import html as html_lib
             thumb_match = re.search(r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']', html, re.IGNORECASE)

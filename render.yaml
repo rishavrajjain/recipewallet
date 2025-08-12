@@ -13,3 +13,7 @@ services:
         sync: false  # Comma-separated proxy URLs like http://user:pass@host:port
       - key: INSTAGRAM_SESSIONID
         sync: false  # Instagram session cookie for authenticated access
+      - key: TIKTOK_SESSIONID
+        sync: false  # TikTok session cookie for authenticated access
+      - key: TIKTOK_WEBID
+        sync: false  # TikTok webid cookie (optional, helps with some requests)
