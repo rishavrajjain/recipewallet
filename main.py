@@ -415,6 +415,18 @@ def run_yt_dlp(url: str, dst: Path) -> dict:
     except Exception:
         pass
 
+    # Resolve vm.tiktok.com shortlinks via HEAD before normalization
+    try:
+        if "vm.tiktok.com" in url.lower():
+            import urllib.request
+            req = urllib.request.Request(url, method="HEAD")
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                final_url = resp.geturl()
+                if final_url:
+                    url = final_url
+    except Exception:
+        pass
+
     # Try different approaches for Instagram with proxy rotation (production only)
     if "instagram.com" in url.lower():
         approaches = []
@@ -556,7 +568,6 @@ def run_yt_dlp(url: str, dst: Path) -> dict:
                     "max_sleep_interval": 5,
                     "ignoreerrors": False,
                     "no_check_certificate": True,
-                    "impersonate": "safari17",
                     "socket_timeout": 30,
                     "proxy": proxy,
                     "extractor_args": {
@@ -591,7 +602,6 @@ def run_yt_dlp(url: str, dst: Path) -> dict:
                     "max_sleep_interval": 5,
                     "ignoreerrors": False,
                     "no_check_certificate": True,
-                    "impersonate": "safari17",
                     "socket_timeout": 30,
                     "proxy": proxy,
                     "extractor_args": {
@@ -626,7 +636,6 @@ def run_yt_dlp(url: str, dst: Path) -> dict:
                 "max_sleep_interval": 5,
                 "ignoreerrors": False,
                 "no_check_certificate": True,
-                "impersonate": "safari17",
                 "socket_timeout": 30,
                 "extractor_args": {
                     "tiktok": {
@@ -655,7 +664,6 @@ def run_yt_dlp(url: str, dst: Path) -> dict:
                 "max_sleep_interval": 5,
                 "ignoreerrors": False,
                 "no_check_certificate": True,
-                "impersonate": "safari17",
                 "socket_timeout": 30,
                 "extractor_args": {
                     "tiktok": {
