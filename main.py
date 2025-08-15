@@ -1301,24 +1301,38 @@ async def handle_tiktok_fallback(link: str):
                 matches = re.findall(pattern, html, re.IGNORECASE)
                 if matches:
                     thumbnail_url = matches[0]
+                    # Fix escaped Unicode characters in URLs
+                    thumbnail_url = thumbnail_url.encode().decode('unicode_escape')
                     print(f"Found thumbnail: {thumbnail_url[:100]}...")
                     break
             
             # If we got reasonable content, create recipe
             if len(caption) > 15 or thumbnail_url:
-                # Quality check - look for recipe-related keywords
-                recipe_keywords = ['recipe', 'cook', 'ingredient', 'minute', 'add', 'mix', 'bake', 'fry', 'boil', 'food', 'eat', 'delicious', 'tasty', 'dish', 'meal']
+                # Enhanced quality check - look for recipe-related keywords and anti-hallucination
+                recipe_keywords = ['recipe', 'cook', 'cooking', 'ingredient', 'ingredients', 'minute', 'minutes', 'add', 'mix', 'bake', 'fry', 'boil', 'food', 'eat', 'delicious', 'tasty', 'dish', 'meal', 'serve', 'serving', 'protein', 'calories', 'carbs', 'fat', 'gram', 'cup', 'tbsp', 'tsp', 'oven', 'pan', 'skewer', 'sauce']
+                
+                # Anti-hallucination keywords (generic content indicators)
+                generic_keywords = ['tiktok', 'follow', 'like', 'subscribe', 'download', 'app', 'social', 'media', 'profile', 'account', 'user', 'platform']
+                
                 caption_lower = caption.lower()
-                keyword_matches = sum(1 for keyword in recipe_keywords if keyword in caption_lower)
+                recipe_matches = sum(1 for keyword in recipe_keywords if keyword in caption_lower)
+                generic_matches = sum(1 for keyword in generic_keywords if keyword in caption_lower)
+                
+                # Food-specific validation
+                food_indicators = any(word in caption_lower for word in ['chicken', 'beef', 'pork', 'fish', 'vegetable', 'pasta', 'rice', 'bread', 'cheese', 'egg', 'milk', 'flour', 'oil', 'salt', 'pepper', 'onion', 'garlic', 'tomato', 'potato', 'carrot', 'mushroom', 'spinach', 'lettuce'])
                 
                 print(f"TikTok content quality check:")
                 print(f"- Caption length: {len(caption)} chars")
-                print(f"- Recipe keywords found: {keyword_matches}/{len(recipe_keywords)}")
+                print(f"- Recipe keywords: {recipe_matches}/{len(recipe_keywords)}")
+                print(f"- Generic keywords: {generic_matches} (lower is better)")
+                print(f"- Contains food words: {food_indicators}")
                 print(f"- Has thumbnail: {bool(thumbnail_url)}")
                 print(f"- Caption sample: {repr(caption[:100])}...")
                 
-                if keyword_matches >= 2 or thumbnail_url:  # At least 2 recipe keywords or thumbnail
-                    print(f"✅ TikTok fallback successful - Content appears recipe-related")
+                # Stricter validation: require recipe keywords AND food indicators, but penalize generic content
+                quality_score = recipe_matches + (2 if food_indicators else 0) - generic_matches
+                if quality_score >= 3 and recipe_matches >= 2:  # At least 2 recipe keywords + food content
+                    print(f"✅ TikTok fallback successful - Quality score: {quality_score}/10, Content is recipe-related")
                     recipe = extract_recipe(
                         caption or "TikTok recipe video", 
                         "", "", 
@@ -1329,7 +1343,8 @@ async def handle_tiktok_fallback(link: str):
                     )
                     return {"success": True, "recipe": recipe, "source": f"tiktok_fallback_{strategy['name']}", "warning": "Used TikTok specialized fallback."}
                 else:
-                    print(f"⚠️ Content quality low - trying next strategy")
+                    print(f"⚠️ Content quality low - Score: {quality_score}, Recipe keywords: {recipe_matches}, Food content: {food_indicators}")
+                    print(f"⚠️ Trying next strategy to find better content...")
                     continue
             else:
                 print(f"Strategy {strategy['name']} insufficient content - trying next")
