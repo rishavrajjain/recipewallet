@@ -346,6 +346,12 @@ def run_yt_dlp(url: str, dst: Path) -> dict:
     # Check if we're in production environment
     is_production = os.getenv("RENDER", "false").lower() == "true" or os.getenv("ENVIRONMENT", "").lower() == "production"
     
+    # Enhanced TikTok debugging
+    tiktok_debug = os.getenv("TIKTOK_DEBUG", "false").lower() == "true"
+    if "tiktok.com" in url.lower() and tiktok_debug:
+        print(f"TikTok Debug Mode: URL={url}, Production={is_production}")
+        print(f"Available env vars: TIKTOK_SESSIONID={bool(os.getenv('TIKTOK_SESSIONID'))}, TIKTOK_WEBID={bool(os.getenv('TIKTOK_WEBID'))}")
+    
     # Rotating proxy list for production only (configure via PROXY_URLS env var)
     proxy_list = []
     proxies_from_env = os.getenv("PROXY_URLS", "").strip()
@@ -530,28 +536,30 @@ def run_yt_dlp(url: str, dst: Path) -> dict:
         if is_production:
             # Production: Create approaches with different proxies
             for i, proxy in enumerate(proxy_list[:5]):  # Use first 5 proxies
-                # Mobile headers for TikTok with rotation
+                # Enhanced mobile headers for TikTok with rotation and better mimicking
                 mobile_user_agents = [
-                    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
-                    "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1",
-                    "Mozilla/5.0 (Linux; Android 13; SM-G991B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
-                    "Mozilla/5.0 (Linux; Android 12; Pixel 6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Mobile Safari/537.36",
+                    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Mobile/15E148 Safari/604.1",
+                    "Mozilla/5.0 (iPhone; CPU iPhone OS 16_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1",
+                    "Mozilla/5.0 (Linux; Android 14; SM-G991B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Mobile Safari/537.36",
+                    "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Mobile Safari/537.36",
+                    "Mozilla/5.0 (Linux; Android 12; SM-A525F) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
                 ]
                 selected_ua = mobile_user_agents[i % len(mobile_user_agents)]
                 tiktok_headers = {
-                    **enhanced_headers,
                     "User-Agent": selected_ua,
-                    "Referer": "https://www.tiktok.com/",
-                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-                    "Accept-Language": "en-US,en;q=0.5",
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+                    "Accept-Language": "en-US,en;q=0.9",
                     "Accept-Encoding": "gzip, deflate, br",
-                    "DNT": "1",
-                    "Connection": "keep-alive",
-                    "Upgrade-Insecure-Requests": "1",
+                    "Cache-Control": "max-age=0",
+                    "Sec-CH-UA": '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
+                    "Sec-CH-UA-Mobile": "?1",
+                    "Sec-CH-UA-Platform": '"Android"',
                     "Sec-Fetch-Dest": "document",
                     "Sec-Fetch-Mode": "navigate",
                     "Sec-Fetch-Site": "none",
                     "Sec-Fetch-User": "?1",
+                    "Upgrade-Insecure-Requests": "1",
+                    "X-Forwarded-For": f"192.168.{(i+1)*13 % 255}.{(i+1)*7 % 255}",  # Randomize apparent IP
                 }
                 
                 # Approach 1: Metadata only with mobile headers and proxy
@@ -568,13 +576,21 @@ def run_yt_dlp(url: str, dst: Path) -> dict:
                     "max_sleep_interval": 5,
                     "ignoreerrors": False,
                     "no_check_certificate": True,
-                    "socket_timeout": 30,
+                    "socket_timeout": 60,
+                    "source_address": None,  # Let system choose
+                    "http_chunk_size": 10485760,  # 10MB chunks
                     "proxy": proxy,
                     "extractor_args": {
                         "tiktok": {
-                            "app_name": ["musically_go", "trill"],
-                            "manifest_app_version": ["370", "340"],
-                            "api_hostname": ["api22-normal-c-useast2a.tiktokv.com"],
+                            "app_name": ["musically_go", "trill", "musical_ly"],
+                            "manifest_app_version": ["390", "380", "370"],
+                            "api_hostname": [
+                                "api22-normal-c-useast2a.tiktokv.com",
+                                "api22-normal-c-useast1a.tiktokv.com", 
+                                "api19-normal-c-useast1a.tiktokv.com"
+                            ],
+                            "aid": ["1988", "1233"],
+                            "app_version": ["29.0.4", "28.9.3", "28.8.5"]
                         }
                     },
                 }
@@ -602,13 +618,21 @@ def run_yt_dlp(url: str, dst: Path) -> dict:
                     "max_sleep_interval": 5,
                     "ignoreerrors": False,
                     "no_check_certificate": True,
-                    "socket_timeout": 30,
+                    "socket_timeout": 60,
+                    "source_address": None,  # Let system choose
+                    "http_chunk_size": 10485760,  # 10MB chunks
                     "proxy": proxy,
                     "extractor_args": {
                         "tiktok": {
-                            "app_name": ["musically_go", "trill"],
-                            "manifest_app_version": ["370", "340"],
-                            "api_hostname": ["api22-normal-c-useast2a.tiktokv.com"],
+                            "app_name": ["musically_go", "trill", "musical_ly"],
+                            "manifest_app_version": ["390", "380", "370"],
+                            "api_hostname": [
+                                "api22-normal-c-useast2a.tiktokv.com",
+                                "api22-normal-c-useast1a.tiktokv.com", 
+                                "api19-normal-c-useast1a.tiktokv.com"
+                            ],
+                            "aid": ["1988", "1233"],
+                            "app_version": ["29.0.4", "28.9.3", "28.8.5"]
                         }
                     },
                 }
@@ -616,11 +640,21 @@ def run_yt_dlp(url: str, dst: Path) -> dict:
                     opts_std["cookiefile"] = cookies_path
                 approaches.append({"opts": opts_std, "name": f"tiktok_standard_proxy_{i}"})
         else:
-            # Local: Use standard approaches without proxies
+            # Local: Use enhanced approaches without proxies but better headers
             tiktok_headers = {
-                **enhanced_headers,
-                "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
-                "Referer": "https://www.tiktok.com/",
+                "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Mobile/15E148 Safari/604.1",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.9",
+                "Accept-Encoding": "gzip, deflate, br",
+                "Cache-Control": "max-age=0",
+                "Sec-CH-UA": '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
+                "Sec-CH-UA-Mobile": "?1",
+                "Sec-CH-UA-Platform": '"iOS"',
+                "Sec-Fetch-Dest": "document",
+                "Sec-Fetch-Mode": "navigate",
+                "Sec-Fetch-Site": "none",
+                "Sec-Fetch-User": "?1",
+                "Upgrade-Insecure-Requests": "1",
             }
             
             opts_meta = {
@@ -708,16 +742,22 @@ def run_yt_dlp(url: str, dst: Path) -> dict:
             }
         ]
 
-    for approach in approaches:
+    for i, approach in enumerate(approaches):
         opts = approach["opts"]
         approach_name = approach["name"]
         
         proxy_info = opts.get("proxy", "None")
         print(f"Attempting download for {url} using approach: {approach_name} with proxy: {mask_proxy(proxy_info if isinstance(proxy_info, str) else None)}")
         
+        # Add delay between attempts, especially for TikTok
+        if i > 0 and "tiktok.com" in url.lower():
+            delay = random.uniform(2, 5)  # Random delay between 2-5 seconds
+            print(f"TikTok rate limiting delay: {delay:.1f}s")
+            time.sleep(delay)
+        
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
-                if approach_name == "metadata_only":
+                if "metadata_only" in approach_name:
                     # For metadata-only approach, don't download
                     info = ydl.extract_info(url, download=False)
                     print("Metadata extraction successful.")
@@ -728,7 +768,18 @@ def run_yt_dlp(url: str, dst: Path) -> dict:
             break
         except Exception as e:
             last_exception = e
+            error_msg = str(e).lower()
             print(f"Download attempt failed with approach {approach_name}. Error: {e}")
+            
+            # Special handling for TikTok rate limiting or blocking
+            if "tiktok.com" in url.lower():
+                if any(keyword in error_msg for keyword in ["rate limit", "too many requests", "blocked", "403", "429"]):
+                    print("TikTok rate limiting detected - extending delay for next attempt")
+                    if i < len(approaches) - 1:  # Not the last attempt
+                        extended_delay = random.uniform(5, 10)
+                        print(f"Extended TikTok delay: {extended_delay:.1f}s")
+                        time.sleep(extended_delay)
+            
             # Clear the destination directory for the next attempt
             for item in dst.glob("*"):
                 if item.is_file():
@@ -1281,6 +1332,42 @@ async def import_recipe(req: Request):
 
             handle = public_oembed_handle_sync(link) or graph_oembed_handle_sync(link) or scrape_instagram_page_handle_sync(link)
             print(f"Extracted handle: {handle}")
+
+            # Enhanced TikTok content validation
+            if platform == "tiktok":
+                minimal_caption = (caption or "").strip()
+                print(f"TikTok fallback - Caption length: {len(minimal_caption)}, Thumbnail: {bool(fallback_thumb)}")
+                
+                # More lenient validation for TikTok with retry attempt
+                if (len(minimal_caption) < 30) and not fallback_thumb:
+                    print("TikTok content insufficient - attempting alternative extraction")
+                    
+                    # Try alternative TikTok patterns
+                    try:
+                        # Look for TikTok-specific metadata in the HTML
+                        tiktok_patterns = [
+                            r'"desc":"([^"]+)"',
+                            r'"text":"([^"]+)"',
+                            r'<meta[^>]*name=["\']description["\'][^>]*content=["\']([^"\']+)["\']',
+                            r'videoObject["\'].*?description["\']:\s*["\']([^"\']+)["\']',
+                            r'__UNIVERSAL_DATA_FOR_REHYDRATION__.*?"desc":"([^"]+)"'
+                        ]
+                        
+                        for pattern in tiktok_patterns:
+                            matches = re.findall(pattern, html, re.IGNORECASE | re.DOTALL)
+                            if matches:
+                                additional_caption = " ".join(matches[:2])  # Take first 2 matches
+                                caption = f"{caption} {additional_caption}".strip()
+                                print(f"Found additional TikTok content via pattern: {len(additional_caption)} chars")
+                                break
+                                
+                        # Final validation after pattern matching
+                        if len(caption.strip()) < 15:
+                            raise HTTPException(502, "TikTok content blocked. Try configuring TIKTOK_SESSIONID or use a different proxy.")
+                            
+                    except Exception as pattern_e:
+                        print(f"TikTok pattern extraction failed: {pattern_e}")
+                        raise HTTPException(502, "TikTok extraction failed. Content may be region-blocked or age-restricted.")
 
             recipe = extract_recipe(caption, "", "", fallback_thumb, platform, handle, "", link)
             return {"success": True, "recipe": recipe, "source": "fallback", "warning": "Used fallback extraction."}
