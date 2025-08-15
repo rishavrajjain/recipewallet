@@ -1393,10 +1393,10 @@ async def import_recipe(req: Request):
         
         # Enhanced error logging for TikTok
         if "tiktok.com" in link.lower():
+            is_production = os.getenv("RENDER", "false").lower() == "true" or os.getenv("ENVIRONMENT", "").lower() == "production"
             print(f"TikTok-specific error analysis:")
             print(f"- Error type: {type(e).__name__}")
             print(f"- Is production: {is_production}")
-            print(f"- Proxy count: {len(proxy_list) if proxy_list else 0}")
             if "HTTP Error" in error_msg:
                 print(f"- HTTP Error detected: likely rate limiting or geo-blocking")
             if "Unable to extract" in error_msg:
