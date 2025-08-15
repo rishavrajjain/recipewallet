@@ -1230,15 +1230,22 @@ async def handle_tiktok_fallback(link: str):
         }
     ]
     
-    # Get proxy if available
+    # Get proxy rotation for better reliability
     is_production = os.getenv("RENDER", "false").lower() == "true" or os.getenv("ENVIRONMENT", "").lower() == "production"
-    selected_proxy = None
+    proxy_list = []
     if is_production:
         proxies_from_env = os.getenv("PROXY_URLS", "").strip()
         if proxies_from_env:
             proxy_values = [p.strip() for p in proxies_from_env.split(",") if p.strip()]
             if proxy_values:
-                selected_proxy = random.choice(proxy_values)
+                proxy_list = proxy_values
+                print(f"TikTok direct extraction using {len(proxy_values)} proxy rotation")
+            else:
+                proxy_list = [None]
+        else:
+            proxy_list = [None]
+    else:
+        proxy_list = [None]
     
     for i, strategy in enumerate(strategies):
         print(f"Trying TikTok strategy: {strategy['name']}")
@@ -1247,15 +1254,34 @@ async def handle_tiktok_fallback(link: str):
             delay = 2 + (i * 1.5)  # 2s, 3.5s, 5s for each strategy
             await asyncio.sleep(delay)
             
-            if selected_proxy:
-                transport = httpx.AsyncHTTPTransport(proxy=selected_proxy)
-                async with httpx.AsyncClient(timeout=30, follow_redirects=True, transport=transport) as client:
-                    resp = await client.get(link, headers=strategy["headers"])
-            else:
-                async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
-                    resp = await client.get(link, headers=strategy["headers"])
+            # Try each proxy for this strategy
+            success = False
+            for proxy_attempt, selected_proxy in enumerate(proxy_list):
+                try:
+                    if selected_proxy:
+                        transport = httpx.AsyncHTTPTransport(proxy=selected_proxy)
+                        async with httpx.AsyncClient(timeout=45, follow_redirects=True, transport=transport) as client:
+                            resp = await client.get(link, headers=strategy["headers"])
+                    else:
+                        async with httpx.AsyncClient(timeout=45, follow_redirects=True) as client:
+                            resp = await client.get(link, headers=strategy["headers"])
                     
-            resp.raise_for_status()
+                    resp.raise_for_status()
+                    success = True
+                    print(f"Strategy {strategy['name']} succeeded with proxy attempt {proxy_attempt}")
+                    break
+                    
+                except Exception as proxy_error:
+                    print(f"Proxy attempt {proxy_attempt} failed: {type(proxy_error).__name__}")
+                    if proxy_attempt < len(proxy_list) - 1:
+                        await asyncio.sleep(1)  # Brief delay before trying next proxy
+                        continue
+                    else:
+                        raise proxy_error  # Re-raise the last error
+            
+            if not success:
+                continue
+                    
             html = resp.text
             print(f"Strategy {strategy['name']} got HTML: {len(html)} chars")
             
@@ -1403,6 +1429,16 @@ async def import_recipe(req: Request):
     print(f"OpenAI API key present: {bool(openai_key)}")
     print(f"OpenAI API key length: {len(openai_key) if openai_key else 0}")
 
+    # For TikTok URLs, skip yt-dlp entirely and go straight to specialized fallback
+    if "tiktok.com" in link.lower():
+        print("🎯 TikTok URL detected - bypassing yt-dlp, using direct extraction")
+        try:
+            result = await handle_tiktok_fallback(link)
+            return result
+        except Exception as tiktok_e:
+            print(f"❌ Direct TikTok extraction failed: {tiktok_e}")
+            # Continue to standard fallback as last resort
+    
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
             recipe = await asyncio.to_thread(_extract_recipe_from_url_sync, link, tmpdir)
