@@ -1240,11 +1240,12 @@ async def handle_tiktok_fallback(link: str):
             if proxy_values:
                 selected_proxy = random.choice(proxy_values)
     
-    for strategy in strategies:
+    for i, strategy in enumerate(strategies):
         print(f"Trying TikTok strategy: {strategy['name']}")
         try:
-            # Small delay between attempts
-            await asyncio.sleep(1)
+            # Progressive delay between attempts to reduce blocking
+            delay = 2 + (i * 1.5)  # 2s, 3.5s, 5s for each strategy
+            await asyncio.sleep(delay)
             
             if selected_proxy:
                 transport = httpx.AsyncHTTPTransport(proxy=selected_proxy)
@@ -1351,7 +1352,11 @@ async def handle_tiktok_fallback(link: str):
                 continue
                 
         except Exception as e:
-            print(f"Strategy {strategy['name']} failed: {e}")
+            print(f"Strategy {strategy['name']} failed: {type(e).__name__}: {e}")
+            # Add longer delay if we're being blocked
+            if "timeout" in str(e).lower() or "blocked" in str(e).lower():
+                print(f"Network issue detected - adding recovery delay")
+                await asyncio.sleep(3)
             continue
     
     # If all strategies failed
