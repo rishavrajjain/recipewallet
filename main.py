@@ -1185,7 +1185,8 @@ async def generate_step_image(idx: int, comp: Dict[str, str]) -> Dict[str, str]:
 
 async def handle_tiktok_fallback(link: str):
     """Specialized TikTok fallback when yt-dlp fails"""
-    print(f"Starting TikTok specialized fallback for: {link}")
+    print(f"🚀 STARTING TIKTOK SPECIALIZED FALLBACK for: {link}")
+    print(f"🔧 Fallback system is active and attempting extraction...")
     
     # Multiple TikTok-specific strategies
     strategies = [
@@ -1277,13 +1278,15 @@ async def handle_tiktok_fallback(link: str):
                 r'__UNIVERSAL_DATA_FOR_REHYDRATION__.*?"desc":"([^"]+)"',
             ]
             
-            for pattern in patterns:
+            for i, pattern in enumerate(patterns):
                 matches = re.findall(pattern, html, re.IGNORECASE | re.DOTALL)
                 if matches:
                     caption_parts = [match.strip() for match in matches[:3] if len(match.strip()) > 10]
                     if caption_parts:
                         caption = " ".join(caption_parts)[:500]  # Limit length
-                        print(f"Found caption via pattern: {len(caption)} chars")
+                        pattern_name = ["desc_json", "description_json", "og_description", "meta_description", "title", "name_json", "video_object", "universal_data"][i]
+                        print(f"Found caption via pattern #{i} ({pattern_name}): {len(caption)} chars")
+                        print(f"CAPTION CONTENT: {repr(caption[:200])}...")  # Show first 200 chars
                         break
             
             # Extract thumbnail
@@ -1303,16 +1306,31 @@ async def handle_tiktok_fallback(link: str):
             
             # If we got reasonable content, create recipe
             if len(caption) > 15 or thumbnail_url:
-                print(f"TikTok fallback successful - Caption: {len(caption)} chars, Thumbnail: {bool(thumbnail_url)}")
-                recipe = extract_recipe(
-                    caption or "TikTok recipe video", 
-                    "", "", 
-                    thumbnail_url, 
-                    "tiktok", 
-                    "", "", 
-                    link
-                )
-                return {"success": True, "recipe": recipe, "source": f"tiktok_fallback_{strategy['name']}", "warning": "Used TikTok specialized fallback."}
+                # Quality check - look for recipe-related keywords
+                recipe_keywords = ['recipe', 'cook', 'ingredient', 'minute', 'add', 'mix', 'bake', 'fry', 'boil', 'food', 'eat', 'delicious', 'tasty', 'dish', 'meal']
+                caption_lower = caption.lower()
+                keyword_matches = sum(1 for keyword in recipe_keywords if keyword in caption_lower)
+                
+                print(f"TikTok content quality check:")
+                print(f"- Caption length: {len(caption)} chars")
+                print(f"- Recipe keywords found: {keyword_matches}/{len(recipe_keywords)}")
+                print(f"- Has thumbnail: {bool(thumbnail_url)}")
+                print(f"- Caption sample: {repr(caption[:100])}...")
+                
+                if keyword_matches >= 2 or thumbnail_url:  # At least 2 recipe keywords or thumbnail
+                    print(f"✅ TikTok fallback successful - Content appears recipe-related")
+                    recipe = extract_recipe(
+                        caption or "TikTok recipe video", 
+                        "", "", 
+                        thumbnail_url, 
+                        "tiktok", 
+                        "", "", 
+                        link
+                    )
+                    return {"success": True, "recipe": recipe, "source": f"tiktok_fallback_{strategy['name']}", "warning": "Used TikTok specialized fallback."}
+                else:
+                    print(f"⚠️ Content quality low - trying next strategy")
+                    continue
             else:
                 print(f"Strategy {strategy['name']} insufficient content - trying next")
                 continue
@@ -1370,7 +1388,20 @@ async def import_recipe(req: Request):
             recipe = await asyncio.to_thread(_extract_recipe_from_url_sync, link, tmpdir)
             return {"success": True, "recipe": recipe, "source": "yt_dlp"}
     except Exception as e:
+        error_msg = str(e)
         print(f"Full yt-dlp process failed for {link}. Error: {e}")
+        
+        # Enhanced error logging for TikTok
+        if "tiktok.com" in link.lower():
+            print(f"TikTok-specific error analysis:")
+            print(f"- Error type: {type(e).__name__}")
+            print(f"- Is production: {is_production}")
+            print(f"- Proxy count: {len(proxy_list) if proxy_list else 0}")
+            if "HTTP Error" in error_msg:
+                print(f"- HTTP Error detected: likely rate limiting or geo-blocking")
+            if "Unable to extract" in error_msg:
+                print(f"- Extraction error: TikTok may have changed their API")
+        
         # Log detailed traceback for debugging
         import traceback
         print("=== FULL TRACEBACK ===")
@@ -1380,11 +1411,15 @@ async def import_recipe(req: Request):
         
         # For TikTok, try multiple fallback strategies
         if "tiktok.com" in link.lower():
-            print("TikTok detected - using specialized fallback extraction")
+            print("🎯 TikTok detected - using specialized fallback extraction")
+            print("📞 Calling handle_tiktok_fallback function...")
             try:
-                return await handle_tiktok_fallback(link)
+                result = await handle_tiktok_fallback(link)
+                print("✅ TikTok specialized fallback succeeded!")
+                return result
             except Exception as tiktok_e:
-                print(f"TikTok specialized fallback failed: {tiktok_e}")
+                print(f"❌ TikTok specialized fallback failed: {tiktok_e}")
+                print("⬇️ Continuing to standard fallback...")
         
         try:
             # Enhanced headers for fallback scraping
@@ -1528,7 +1563,8 @@ async def import_recipe(req: Request):
             
             # Last resort for TikTok - create a minimal recipe
             if "tiktok.com" in link.lower():
-                print("Creating minimal TikTok recipe as last resort")
+                print("🆘 LAST RESORT: Creating minimal TikTok recipe template")
+                print("📝 All extraction methods failed - providing editable template")
                 video_id = re.search(r'/video/(\d+)', link)
                 video_id = video_id.group(1) if video_id else "unknown"
                 
