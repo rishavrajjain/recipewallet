@@ -1183,6 +1183,147 @@ async def generate_step_image(idx: int, comp: Dict[str, str]) -> Dict[str, str]:
     url = f"{BASE_URL}/images/{image_filename}"
     return {"step_number": idx, "image_url": url}
 
+async def handle_tiktok_fallback(link: str):
+    """Specialized TikTok fallback when yt-dlp fails"""
+    print(f"Starting TikTok specialized fallback for: {link}")
+    
+    # Multiple TikTok-specific strategies
+    strategies = [
+        {
+            "name": "mobile_browser",
+            "headers": {
+                "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.5",
+                "Accept-Encoding": "gzip, deflate",
+                "Referer": "https://www.tiktok.com/",
+                "DNT": "1",
+                "Connection": "keep-alive",
+                "Upgrade-Insecure-Requests": "1",
+            }
+        },
+        {
+            "name": "android_app",
+            "headers": {
+                "User-Agent": "com.ss.android.ugc.trill/494+PlayStore+en",
+                "Accept": "application/json, text/plain, */*",
+                "Accept-Language": "en-US,en;q=0.9",
+                "Accept-Encoding": "gzip, deflate, br",
+            }
+        },
+        {
+            "name": "desktop_chrome",
+            "headers": {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.9",
+                "Accept-Encoding": "gzip, deflate, br",
+                "Sec-CH-UA": '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"',
+                "Sec-CH-UA-Mobile": "?0",
+                "Sec-CH-UA-Platform": '"Windows"',
+                "Sec-Fetch-Dest": "document",
+                "Sec-Fetch-Mode": "navigate",
+                "Sec-Fetch-Site": "none",
+                "Sec-Fetch-User": "?1",
+            }
+        }
+    ]
+    
+    # Get proxy if available
+    is_production = os.getenv("RENDER", "false").lower() == "true" or os.getenv("ENVIRONMENT", "").lower() == "production"
+    selected_proxy = None
+    if is_production:
+        proxies_from_env = os.getenv("PROXY_URLS", "").strip()
+        if proxies_from_env:
+            proxy_values = [p.strip() for p in proxies_from_env.split(",") if p.strip()]
+            if proxy_values:
+                selected_proxy = random.choice(proxy_values)
+    
+    for strategy in strategies:
+        print(f"Trying TikTok strategy: {strategy['name']}")
+        try:
+            # Small delay between attempts
+            await asyncio.sleep(1)
+            
+            if selected_proxy:
+                transport = httpx.AsyncHTTPTransport(proxy=selected_proxy)
+                async with httpx.AsyncClient(timeout=30, follow_redirects=True, transport=transport) as client:
+                    resp = await client.get(link, headers=strategy["headers"])
+            else:
+                async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+                    resp = await client.get(link, headers=strategy["headers"])
+                    
+            resp.raise_for_status()
+            html = resp.text
+            print(f"Strategy {strategy['name']} got HTML: {len(html)} chars")
+            
+            # Extract TikTok content using multiple patterns
+            caption = ""
+            thumbnail_url = ""
+            
+            # Try multiple extraction patterns
+            patterns = [
+                # Primary TikTok patterns
+                r'"desc":"([^"]+)"',
+                r'"description":"([^"]+)"',
+                r'<meta[^>]*property=["\']og:description["\'][^>]*content=["\']([^"\']+)["\']',
+                r'<meta[^>]*name=["\']description["\'][^>]*content=["\']([^"\']+)["\']',
+                # Video title patterns
+                r'<title[^>]*>([^<]+)</title>',
+                # JSON-LD patterns
+                r'"name":"([^"]+)"',
+                # Alternative patterns
+                r'videoObject.*?"description":\s*"([^"]+)"',
+                r'__UNIVERSAL_DATA_FOR_REHYDRATION__.*?"desc":"([^"]+)"',
+            ]
+            
+            for pattern in patterns:
+                matches = re.findall(pattern, html, re.IGNORECASE | re.DOTALL)
+                if matches:
+                    caption_parts = [match.strip() for match in matches[:3] if len(match.strip()) > 10]
+                    if caption_parts:
+                        caption = " ".join(caption_parts)[:500]  # Limit length
+                        print(f"Found caption via pattern: {len(caption)} chars")
+                        break
+            
+            # Extract thumbnail
+            thumb_patterns = [
+                r'<meta[^>]*property=["\']og:image["\'][^>]*content=["\']([^"\']+)["\']',
+                r'<meta[^>]*name=["\']twitter:image["\'][^>]*content=["\']([^"\']+)["\']',
+                r'"cover":"([^"]+)"',
+                r'"thumbnail":"([^"]+)"',
+            ]
+            
+            for pattern in thumb_patterns:
+                matches = re.findall(pattern, html, re.IGNORECASE)
+                if matches:
+                    thumbnail_url = matches[0]
+                    print(f"Found thumbnail: {thumbnail_url[:100]}...")
+                    break
+            
+            # If we got reasonable content, create recipe
+            if len(caption) > 15 or thumbnail_url:
+                print(f"TikTok fallback successful - Caption: {len(caption)} chars, Thumbnail: {bool(thumbnail_url)}")
+                recipe = extract_recipe(
+                    caption or "TikTok recipe video", 
+                    "", "", 
+                    thumbnail_url, 
+                    "tiktok", 
+                    "", "", 
+                    link
+                )
+                return {"success": True, "recipe": recipe, "source": f"tiktok_fallback_{strategy['name']}", "warning": "Used TikTok specialized fallback."}
+            else:
+                print(f"Strategy {strategy['name']} insufficient content - trying next")
+                continue
+                
+        except Exception as e:
+            print(f"Strategy {strategy['name']} failed: {e}")
+            continue
+    
+    # If all strategies failed
+    raise HTTPException(502, "All TikTok fallback strategies failed. TikTok content may be region-blocked or require authentication.")
+
 def _extract_recipe_from_url_sync(link: str, tmpdir: str) -> Dict:
     tmp = Path(tmpdir)
     info = run_yt_dlp(link, tmp)
@@ -1235,22 +1376,33 @@ async def import_recipe(req: Request):
         print("=== FULL TRACEBACK ===")
         traceback.print_exc()
         print("=== END TRACEBACK ===")
-        print("Falling back to basic scrape…")
+        print("Falling back to enhanced scrape with multiple strategies…")
+        
+        # For TikTok, try multiple fallback strategies
+        if "tiktok.com" in link.lower():
+            print("TikTok detected - using specialized fallback extraction")
+            try:
+                return await handle_tiktok_fallback(link)
+            except Exception as tiktok_e:
+                print(f"TikTok specialized fallback failed: {tiktok_e}")
+        
         try:
             # Enhanced headers for fallback scraping
             fallback_headers = {
-                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
                 "Accept-Language": "en-US,en;q=0.9",
                 "Accept-Encoding": "gzip, deflate, br",
-                "DNT": "1",
-                "Connection": "keep-alive",
-                "Upgrade-Insecure-Requests": "1",
+                "Cache-Control": "no-cache",
+                "Pragma": "no-cache",
+                "Sec-CH-UA": '"Not_A Brand";v="8", "Chromium";v="120"',
+                "Sec-CH-UA-Mobile": "?1",
+                "Sec-CH-UA-Platform": '"iOS"',
                 "Sec-Fetch-Dest": "document",
                 "Sec-Fetch-Mode": "navigate",
                 "Sec-Fetch-Site": "none",
                 "Sec-Fetch-User": "?1",
-                "Cache-Control": "max-age=0"
+                "Upgrade-Insecure-Requests": "1"
             }
             
             # Use proxy for fallback scraping in production if available
@@ -1373,6 +1525,40 @@ async def import_recipe(req: Request):
             return {"success": True, "recipe": recipe, "source": "fallback", "warning": "Used fallback extraction."}
         except Exception as e2:
             print(f"Fallback scrape failed: {e2}")
+            
+            # Last resort for TikTok - create a minimal recipe
+            if "tiktok.com" in link.lower():
+                print("Creating minimal TikTok recipe as last resort")
+                video_id = re.search(r'/video/(\d+)', link)
+                video_id = video_id.group(1) if video_id else "unknown"
+                
+                minimal_recipe = {
+                    "id": str(uuid.uuid4()),
+                    "title": f"TikTok Recipe #{video_id}",
+                    "description": "Recipe extracted from TikTok video. Manual editing may be required.",
+                    "imageUrl": "",
+                    "prepTime": 15,
+                    "cookTime": 20,
+                    "difficulty": "Easy",
+                    "nutrition": {"calories": None, "protein": None, "carbs": None, "fats": None, "portions": 2},
+                    "ingredients": [{
+                        "name": "Please add ingredients from the TikTok video manually",
+                        "category": "Other"
+                    }],
+                    "steps": [
+                        "Watch the TikTok video to see the preparation steps",
+                        "Add ingredients and steps manually based on the video content"
+                    ],
+                    "isFromReel": True,
+                    "extractedFrom": "tiktok",
+                    "creatorHandle": None,
+                    "creatorName": None,
+                    "originalUrl": link,
+                    "createdAt": datetime.utcnow().isoformat()
+                }
+                
+                return {"success": True, "recipe": minimal_recipe, "source": "minimal_fallback", "warning": "TikTok extraction failed. Created minimal recipe template - please edit manually."}
+            
             raise HTTPException(500, f"Failed to process link: {e2}")
 
 @app.post("/generate-step-images")
