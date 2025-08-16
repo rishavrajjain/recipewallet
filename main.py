@@ -1404,6 +1404,7 @@ async def extract_and_transcribe_audio(url: str, strategy_name: str, proxy: str 
             
             if transcript_text:
                 print(f"✅ Audio transcription successful: {len(transcript_text)} chars")
+                print(f"🗣️ FULL TRANSCRIPT: {repr(transcript_text)}")
                 print(f"🗣️ Transcript preview: {repr(transcript_text[:150])}...")
             else:
                 print("⚠️ Audio transcription returned empty result")
