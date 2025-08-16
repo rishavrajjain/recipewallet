@@ -1183,79 +1183,174 @@ async def generate_step_image(idx: int, comp: Dict[str, str]) -> Dict[str, str]:
     url = f"{BASE_URL}/images/{image_filename}"
     return {"step_number": idx, "image_url": url}
 
-async def extract_and_transcribe_audio(url: str, strategy_name: str, proxy: str = None) -> str:
+async def extract_video_url_from_html(html: str) -> str:
+    """Extract direct video URL from TikTok/Instagram HTML"""
+    
+    # TikTok video URL patterns
+    patterns = [
+        # TikTok video URLs in various formats
+        r'"playAddr":"([^"]+)"',
+        r'"downloadAddr":"([^"]+)"', 
+        r'"playaddr":"([^"]+)"',
+        r'"download_addr":"([^"]+)"',
+        r'playAddr":\s*"([^"]+)"',
+        r'videoApi":\s*"([^"]+)"',
+        r'"srcNoWaterMark":"([^"]+)"',
+        r'"video":\s*{[^}]*"playAddr":"([^"]+)"',
+        # Backup patterns
+        r'https://[^"]*\.tiktokcdn[^"]*\.mp4[^"]*',
+        r'https://[^"]*\.musical\.ly[^"]*\.mp4[^"]*',
+    ]
+    
+    for pattern in patterns:
+        matches = re.findall(pattern, html, re.IGNORECASE)
+        if matches:
+            video_url = matches[0]
+            # Clean up escaped characters
+            video_url = video_url.replace('\\u002F', '/').replace('\\/', '/')
+            if video_url.startswith('http') and ('.mp4' in video_url or 'tiktokcdn' in video_url):
+                return video_url
+    
+    return ""
+
+async def extract_and_transcribe_audio(url: str, strategy_name: str, proxy: str = None, html: str = "") -> str:
     """Extract audio from social media video and transcribe it using OpenAI Whisper"""
     
     print(f"🎵 Attempting audio extraction for {strategy_name}")
     
     try:
-        # Use yt-dlp specifically for audio extraction (more reliable than parsing video URLs)
         import tempfile
         from pathlib import Path
+        import subprocess
         
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
             
-            # Configure yt-dlp for audio-only extraction
-            ydl_opts = {
-                "format": "bestaudio/best",
-                "outtmpl": str(tmp_path / "%(id)s.%(ext)s"),
-                "quiet": True,
-                "no_warnings": True,
-                "extract_flat": False,
-                "postprocessors": [{
-                    "key": "FFmpegExtractAudio",
-                    "preferredcodec": "mp3",
-                    "preferredquality": "192"
-                }],
-                "http_headers": {
-                    "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Mobile/15E148 Safari/604.1"
-                },
-                "socket_timeout": 30,
-                "retries": 2,
-                "fragment_retries": 2,
-                "extractor_retries": 2,
-            }
-            
-            # Add proxy if available
-            if proxy:
-                ydl_opts["proxy"] = proxy
-                print(f"Using proxy for audio extraction: {mask_proxy(proxy)}")
-            
-            # Extract audio using yt-dlp
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                try:
-                    info = ydl.extract_info(url, download=True)
-                    if not info:
-                        return ""
-                    
-                    # Find the downloaded audio file
-                    audio_file = None
-                    for ext in ["mp3", "m4a", "webm", "opus"]:
-                        potential_file = tmp_path / f"{info['id']}.{ext}"
-                        if potential_file.exists():
-                            audio_file = potential_file
-                            break
-                    
-                    if not audio_file or not audio_file.exists():
-                        print("No audio file found after extraction")
-                        return ""
-                    
-                    print(f"Audio file extracted: {audio_file.name}, size: {audio_file.stat().st_size} bytes")
-                    
-                    # Transcribe audio using OpenAI Whisper
-                    with audio_file.open("rb") as f:
-                        transcript = client.audio.transcriptions.create(
-                            model="whisper-1", 
-                            file=f,
-                            response_format="text"
-                        )
-                    
-                    return transcript.strip() if transcript else ""
-                    
-                except Exception as ydl_e:
-                    print(f"yt-dlp audio extraction failed: {ydl_e}")
+            # For TikTok, try to extract video URL from HTML first 
+            video_url = ""
+            if "tiktok.com" in url.lower() and html:
+                print("🔍 Extracting video URL from TikTok HTML...")
+                video_url = await extract_video_url_from_html(html)
+                if video_url:
+                    print(f"Found video URL: {video_url[:100]}...")
+                else:
+                    print("No video URL found in HTML")
                     return ""
+            
+            if not video_url:
+                # Fallback to yt-dlp for non-TikTok or when HTML parsing fails
+                print(f"🔄 Fallback to yt-dlp for {strategy_name}")
+                
+                ydl_opts = {
+                    "format": "bestaudio/best",
+                    "outtmpl": str(tmp_path / "%(id)s.%(ext)s"),
+                    "quiet": True,
+                    "no_warnings": True,
+                    "extract_flat": False,
+                    "postprocessors": [{
+                        "key": "FFmpegExtractAudio",
+                        "preferredcodec": "mp3",
+                        "preferredquality": "192"
+                    }],
+                    "http_headers": {
+                        "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Mobile/15E148 Safari/604.1"
+                    },
+                    "socket_timeout": 30,
+                    "retries": 1,
+                    "fragment_retries": 1,
+                    "extractor_retries": 1,
+                }
+                
+                if proxy:
+                    ydl_opts["proxy"] = proxy
+                
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    try:
+                        info = ydl.extract_info(url, download=True)
+                        if not info:
+                            return ""
+                        
+                        # Find the downloaded audio file
+                        audio_file = None
+                        for ext in ["mp3", "m4a", "webm", "opus"]:
+                            potential_file = tmp_path / f"{info['id']}.{ext}"
+                            if potential_file.exists():
+                                audio_file = potential_file
+                                break
+                        
+                        if not audio_file or not audio_file.exists():
+                            print("No audio file found after yt-dlp extraction")
+                            return ""
+                            
+                    except Exception as ydl_e:
+                        print(f"yt-dlp audio extraction failed: {ydl_e}")
+                        return ""
+            else:
+                # Download video directly and extract audio
+                print(f"📥 Downloading video directly...")
+                
+                headers = {
+                    "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Mobile/15E148 Safari/604.1",
+                    "Referer": "https://www.tiktok.com/",
+                    "Accept": "*/*",
+                }
+                
+                try:
+                    if proxy:
+                        transport = httpx.AsyncHTTPTransport(proxy=proxy)
+                        async with httpx.AsyncClient(timeout=60, transport=transport) as client:
+                            response = await client.get(video_url, headers=headers)
+                    else:
+                        async with httpx.AsyncClient(timeout=60) as client:
+                            response = await client.get(video_url, headers=headers)
+                    
+                    response.raise_for_status()
+                    
+                    video_file = tmp_path / "video.mp4"
+                    with video_file.open("wb") as f:
+                        f.write(response.content)
+                    
+                    print(f"Video downloaded: {video_file.stat().st_size} bytes")
+                    
+                    # Extract audio using ffmpeg
+                    audio_file = tmp_path / "audio.mp3"
+                    cmd = [
+                        "ffmpeg", "-i", str(video_file), 
+                        "-vn", "-acodec", "mp3", "-ab", "192k", 
+                        "-ar", "44100", "-y", str(audio_file)
+                    ]
+                    
+                    result = subprocess.run(cmd, capture_output=True, text=True)
+                    if result.returncode != 0:
+                        print(f"FFmpeg failed: {result.stderr}")
+                        return ""
+                        
+                except Exception as download_e:
+                    print(f"Direct video download failed: {download_e}")
+                    return ""
+            
+            # Find the audio file
+            audio_file = None
+            for potential_file in tmp_path.glob("*"):
+                if potential_file.suffix.lower() in [".mp3", ".m4a", ".webm", ".opus"]:
+                    audio_file = potential_file
+                    break
+            
+            if not audio_file or not audio_file.exists():
+                print("No audio file found after extraction")
+                return ""
+            
+            print(f"Audio file ready: {audio_file.name}, size: {audio_file.stat().st_size} bytes")
+            
+            # Transcribe audio using OpenAI Whisper
+            with audio_file.open("rb") as f:
+                transcript = client.audio.transcriptions.create(
+                    model="whisper-1", 
+                    file=f,
+                    response_format="text"
+                )
+            
+            return transcript.strip() if transcript else ""
                     
     except Exception as e:
         print(f"Audio transcription failed: {type(e).__name__}: {e}")
@@ -1414,7 +1509,7 @@ async def handle_tiktok_fallback(link: str):
             # Try to extract and transcribe audio
             audio_transcript = ""
             try:
-                audio_transcript = await extract_and_transcribe_audio(link, strategy["name"], selected_proxy)
+                audio_transcript = await extract_and_transcribe_audio(link, strategy["name"], selected_proxy, html)
                 if audio_transcript:
                     print(f"Audio transcript extracted: {len(audio_transcript)} chars")
                     print(f"AUDIO CONTENT: {repr(audio_transcript[:200])}...")
@@ -1708,7 +1803,7 @@ async def import_recipe(req: Request):
             if platform in ["instagram", "tiktok"]:
                 try:
                     print(f"🎵 Attempting audio extraction for {platform}")
-                    audio_transcript = await extract_and_transcribe_audio(link, f"{platform}_fallback", selected_proxy)
+                    audio_transcript = await extract_and_transcribe_audio(link, f"{platform}_fallback", selected_proxy, html)
                     if audio_transcript:
                         print(f"Audio transcript extracted: {len(audio_transcript)} chars")
                         caption = f"{caption} {audio_transcript}".strip()
