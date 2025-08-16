@@ -1680,8 +1680,15 @@ async def import_recipe(req: Request):
             result = await handle_tiktok_fallback(link)
             return result
         except Exception as tiktok_e:
-            print(f"❌ Direct TikTok extraction failed: {tiktok_e}")
-            # Continue to standard fallback as last resort
+            print(f"⚠️ TikTok fallback failed, retrying: {tiktok_e}")
+            # For TikTok URLs, NEVER use yt-dlp - retry TikTok fallback instead
+            try:
+                await asyncio.sleep(2)  # Brief delay before retry
+                result = await handle_tiktok_fallback(link)
+                return result
+            except Exception as final_tiktok_e:
+                print(f"❌ All TikTok extraction attempts failed: {final_tiktok_e}")
+                raise HTTPException(502, "TikTok extraction failed after multiple attempts. Content may be region-blocked or require authentication.")
     
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
