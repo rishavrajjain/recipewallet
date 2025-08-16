@@ -1378,28 +1378,54 @@ async def extract_and_transcribe_audio(url: str, strategy_name: str, proxy: str 
             print(f"🎙️ Transcribing audio with Whisper...")
             
             try:
-                # Try sync client first
-                with audio_file.open("rb") as f:
-                    transcript = client.audio.transcriptions.create(
-                        model="whisper-1", 
-                        file=f,
-                        response_format="text"
-                    )
-                transcript_text = transcript.strip() if transcript else ""
+                # Try sync client with latest model first
+                try:
+                    with audio_file.open("rb") as f:
+                        # Primary: newest, highest-accuracy model
+                        transcript = client.audio.transcriptions.create(
+                            model="gpt-4o-transcribe",
+                            file=f,
+                            response_format="text",
+                        )
+                    transcript_text = transcript.strip() if transcript else ""
+                    print(f"🎯 Used gpt-4o-transcribe model for transcription")
+                except Exception as latest_e:
+                    print(f"⚠️ gpt-4o-transcribe failed ({latest_e}), falling back to whisper-1...")
+                    # Fallback for compatibility or quota issues
+                    with audio_file.open("rb") as f:
+                        transcript = client.audio.transcriptions.create(
+                            model="whisper-1",
+                            file=f,
+                            response_format="text",
+                        )
+                    transcript_text = transcript.strip() if transcript else ""
+                    print(f"🎯 Used whisper-1 model for transcription")
                 
             except AttributeError as ae:
                 print(f"⚠️ Sync client failed ({ae}), trying async client...")
                 try:
-                    # Fallback to async client
-                    with audio_file.open("rb") as f:
-                        transcript = await aclient.audio.transcriptions.create(
-                            model="whisper-1", 
-                            file=f,
-                            response_format="text"
-                        )
-                    transcript_text = transcript.strip() if transcript else ""
+                    # Fallback to async client with latest model
+                    try:
+                        with audio_file.open("rb") as f:
+                            transcript = await aclient.audio.transcriptions.create(
+                                model="gpt-4o-transcribe",
+                                file=f,
+                                response_format="text",
+                            )
+                        transcript_text = transcript.strip() if transcript else ""
+                        print(f"🎯 Used async gpt-4o-transcribe model")
+                    except Exception as async_latest_e:
+                        print(f"⚠️ Async gpt-4o-transcribe failed ({async_latest_e}), falling back to whisper-1...")
+                        with audio_file.open("rb") as f:
+                            transcript = await aclient.audio.transcriptions.create(
+                                model="whisper-1",
+                                file=f,
+                                response_format="text",
+                            )
+                        transcript_text = transcript.strip() if transcript else ""
+                        print(f"🎯 Used async whisper-1 model")
                 except Exception as async_e:
-                    print(f"❌ Async client also failed: {async_e}")
+                    print(f"❌ All transcription methods failed: {async_e}")
                     return ""
             
             if transcript_text:
