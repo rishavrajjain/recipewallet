@@ -1186,9 +1186,9 @@ async def generate_step_image(idx: int, comp: Dict[str, str]) -> Dict[str, str]:
 async def extract_video_url_from_html(html: str) -> str:
     """Extract direct video URL from TikTok/Instagram HTML"""
     
-    # TikTok video URL patterns
+    # TikTok video URL patterns - updated for 2025
     patterns = [
-        # TikTok video URLs in various formats
+        # Modern TikTok video URLs in various formats
         r'"playAddr":"([^"]+)"',
         r'"downloadAddr":"([^"]+)"', 
         r'"playaddr":"([^"]+)"',
@@ -1197,20 +1197,40 @@ async def extract_video_url_from_html(html: str) -> str:
         r'videoApi":\s*"([^"]+)"',
         r'"srcNoWaterMark":"([^"]+)"',
         r'"video":\s*{[^}]*"playAddr":"([^"]+)"',
-        # Backup patterns
-        r'https://[^"]*\.tiktokcdn[^"]*\.mp4[^"]*',
-        r'https://[^"]*\.musical\.ly[^"]*\.mp4[^"]*',
+        # New 2025 patterns
+        r'"playUrl":"([^"]+)"',
+        r'"videoUrl":"([^"]+)"',
+        r'"play_url":"([^"]+)"',
+        r'"video_url":"([^"]+)"',
+        r'"bitrate":\s*\d+[^}]*"play_addr":\s*{[^}]*"url_list":\s*\["([^"]+)"',
+        r'"play_addr":\s*{[^}]*"url_list":\s*\["([^"]+)"',
+        r'"url_list":\s*\["([^"]*\.mp4[^"]*)"',
+        # Direct URL patterns
+        r'https://[^"\']*\.tiktokcdn[^"\']*\.mp4[^"\']*',
+        r'https://[^"\']*\.byteoversea[^"\']*\.mp4[^"\']*',
+        r'https://[^"\']*\.tiktok[^"\']*\.mp4[^"\']*',
+        r'https://[^"\']*\.musical\.ly[^"\']*\.mp4[^"\']*',
     ]
     
-    for pattern in patterns:
+    print(f"🔍 Searching {len(patterns)} video URL patterns in HTML...")
+    
+    for i, pattern in enumerate(patterns):
         matches = re.findall(pattern, html, re.IGNORECASE)
         if matches:
+            print(f"✅ Pattern #{i} matched: {pattern[:50]}... found {len(matches)} URLs")
             video_url = matches[0]
             # Clean up escaped characters
             video_url = video_url.replace('\\u002F', '/').replace('\\/', '/')
-            if video_url.startswith('http') and ('.mp4' in video_url or 'tiktokcdn' in video_url):
+            print(f"🎬 Extracted video URL: {video_url[:150]}...")
+            if video_url.startswith('http') and ('.mp4' in video_url or 'tiktokcdn' in video_url or 'byteoversea' in video_url):
+                print(f"✅ Valid video URL found")
                 return video_url
+            else:
+                print(f"⚠️ URL doesn't match validation criteria")
+        else:
+            print(f"❌ Pattern #{i} no match: {pattern[:50]}...")
     
+    print(f"❌ No video URL found in {len(html)} char HTML")
     return ""
 
 async def extract_and_transcribe_audio(url: str, strategy_name: str, proxy: str = None, html: str = "") -> str:
