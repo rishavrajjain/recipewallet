@@ -1319,13 +1319,13 @@ async def extract_and_transcribe_audio(url: str, strategy_name: str, proxy: str 
                     if proxy:
                         print(f"🌐 Using proxy for video download: {proxy}")
                         transport = httpx.AsyncHTTPTransport(proxy=proxy)
-                        async with httpx.AsyncClient(timeout=60, transport=transport) as client:
+                        async with httpx.AsyncClient(timeout=30, transport=transport) as client:
                             print(f"📡 Making HTTP request to video URL...")
                             response = await client.get(video_url, headers=headers)
                             print(f"📡 HTTP response status: {response.status_code}")
                     else:
                         print(f"🌐 Direct video download (no proxy)")
-                        async with httpx.AsyncClient(timeout=60) as client:
+                        async with httpx.AsyncClient(timeout=30) as client:
                             print(f"📡 Making HTTP request to video URL...")
                             response = await client.get(video_url, headers=headers)
                             print(f"📡 HTTP response status: {response.status_code}")
@@ -1356,7 +1356,14 @@ async def extract_and_transcribe_audio(url: str, strategy_name: str, proxy: str 
                         print(f"✅ FFmpeg audio extraction successful")
                         
                 except Exception as download_e:
-                    print(f"❌ Direct video download failed: {type(download_e).__name__}: {download_e}")
+                    error_type = type(download_e).__name__
+                    print(f"❌ Direct video download failed: {error_type}: {download_e}")
+                    
+                    # For timeout errors, fail fast to avoid blocking the whole request
+                    if "timeout" in error_type.lower() or "timeout" in str(download_e).lower():
+                        print(f"⏱️ Video download timeout - skipping audio extraction to avoid request timeout")
+                        return ""
+                    
                     import traceback
                     print(f"📍 Download error traceback: {traceback.format_exc()}")
                     return ""
@@ -1386,6 +1393,7 @@ async def extract_and_transcribe_audio(url: str, strategy_name: str, proxy: str 
                             model="gpt-4o-transcribe",
                             file=f,
                             response_format="text",
+                            language="en"  # Force English to avoid foreign language transcription
                         )
                     transcript_text = transcript.strip() if transcript else ""
                     print(f"🎯 Used gpt-4o-transcribe model for transcription")
@@ -1397,6 +1405,7 @@ async def extract_and_transcribe_audio(url: str, strategy_name: str, proxy: str 
                             model="whisper-1",
                             file=f,
                             response_format="text",
+                            language="en"  # Force English transcription
                         )
                     transcript_text = transcript.strip() if transcript else ""
                     print(f"🎯 Used whisper-1 model for transcription")
@@ -1411,6 +1420,7 @@ async def extract_and_transcribe_audio(url: str, strategy_name: str, proxy: str 
                                 model="gpt-4o-transcribe",
                                 file=f,
                                 response_format="text",
+                                language="en"  # Force English transcription
                             )
                         transcript_text = transcript.strip() if transcript else ""
                         print(f"🎯 Used async gpt-4o-transcribe model")
@@ -1421,6 +1431,7 @@ async def extract_and_transcribe_audio(url: str, strategy_name: str, proxy: str 
                                 model="whisper-1",
                                 file=f,
                                 response_format="text",
+                                language="en"  # Force English transcription
                             )
                         transcript_text = transcript.strip() if transcript else ""
                         print(f"🎯 Used async whisper-1 model")
