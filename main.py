@@ -1369,14 +1369,32 @@ async def extract_and_transcribe_audio(url: str, strategy_name: str, proxy: str 
             
             # Transcribe audio using OpenAI Whisper
             print(f"🎙️ Transcribing audio with Whisper...")
-            with audio_file.open("rb") as f:
-                transcript = client.audio.transcriptions.create(
-                    model="whisper-1", 
-                    file=f,
-                    response_format="text"
-                )
             
-            transcript_text = transcript.strip() if transcript else ""
+            try:
+                # Try sync client first
+                with audio_file.open("rb") as f:
+                    transcript = client.audio.transcriptions.create(
+                        model="whisper-1", 
+                        file=f,
+                        response_format="text"
+                    )
+                transcript_text = transcript.strip() if transcript else ""
+                
+            except AttributeError as ae:
+                print(f"⚠️ Sync client failed ({ae}), trying async client...")
+                try:
+                    # Fallback to async client
+                    with audio_file.open("rb") as f:
+                        transcript = await aclient.audio.transcriptions.create(
+                            model="whisper-1", 
+                            file=f,
+                            response_format="text"
+                        )
+                    transcript_text = transcript.strip() if transcript else ""
+                except Exception as async_e:
+                    print(f"❌ Async client also failed: {async_e}")
+                    return ""
+            
             if transcript_text:
                 print(f"✅ Audio transcription successful: {len(transcript_text)} chars")
                 print(f"🗣️ Transcript preview: {repr(transcript_text[:150])}...")
