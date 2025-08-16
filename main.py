@@ -1320,13 +1320,18 @@ async def extract_and_transcribe_audio(url: str, strategy_name: str, proxy: str 
                         print(f"🌐 Using proxy for video download: {proxy}")
                         transport = httpx.AsyncHTTPTransport(proxy=proxy)
                         async with httpx.AsyncClient(timeout=60, transport=transport) as client:
+                            print(f"📡 Making HTTP request to video URL...")
                             response = await client.get(video_url, headers=headers)
+                            print(f"📡 HTTP response status: {response.status_code}")
                     else:
                         print(f"🌐 Direct video download (no proxy)")
                         async with httpx.AsyncClient(timeout=60) as client:
+                            print(f"📡 Making HTTP request to video URL...")
                             response = await client.get(video_url, headers=headers)
+                            print(f"📡 HTTP response status: {response.status_code}")
                     
                     response.raise_for_status()
+                    print(f"✅ HTTP request successful, content length: {len(response.content)} bytes")
                     
                     video_file = tmp_path / "video.mp4"
                     with video_file.open("wb") as f:
@@ -1351,7 +1356,9 @@ async def extract_and_transcribe_audio(url: str, strategy_name: str, proxy: str 
                         print(f"✅ FFmpeg audio extraction successful")
                         
                 except Exception as download_e:
-                    print(f"❌ Direct video download failed: {download_e}")
+                    print(f"❌ Direct video download failed: {type(download_e).__name__}: {download_e}")
+                    import traceback
+                    print(f"📍 Download error traceback: {traceback.format_exc()}")
                     return ""
             
             # Find the audio file
