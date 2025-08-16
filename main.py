@@ -1287,7 +1287,7 @@ async def extract_and_transcribe_audio(url: str, strategy_name: str, proxy: str 
                         return ""
             else:
                 # Download video directly and extract audio
-                print(f"📥 Downloading video directly...")
+                print(f"📥 Downloading video directly from: {video_url[:100]}...")
                 
                 headers = {
                     "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Mobile/15E148 Safari/604.1",
@@ -1297,10 +1297,12 @@ async def extract_and_transcribe_audio(url: str, strategy_name: str, proxy: str 
                 
                 try:
                     if proxy:
+                        print(f"🌐 Using proxy for video download: {proxy}")
                         transport = httpx.AsyncHTTPTransport(proxy=proxy)
                         async with httpx.AsyncClient(timeout=60, transport=transport) as client:
                             response = await client.get(video_url, headers=headers)
                     else:
+                        print(f"🌐 Direct video download (no proxy)")
                         async with httpx.AsyncClient(timeout=60) as client:
                             response = await client.get(video_url, headers=headers)
                     
@@ -1310,7 +1312,7 @@ async def extract_and_transcribe_audio(url: str, strategy_name: str, proxy: str 
                     with video_file.open("wb") as f:
                         f.write(response.content)
                     
-                    print(f"Video downloaded: {video_file.stat().st_size} bytes")
+                    print(f"✅ Video downloaded: {video_file.stat().st_size} bytes")
                     
                     # Extract audio using ffmpeg
                     audio_file = tmp_path / "audio.mp3"
@@ -1320,13 +1322,16 @@ async def extract_and_transcribe_audio(url: str, strategy_name: str, proxy: str 
                         "-ar", "44100", "-y", str(audio_file)
                     ]
                     
+                    print(f"🎬 Extracting audio with FFmpeg...")
                     result = subprocess.run(cmd, capture_output=True, text=True)
                     if result.returncode != 0:
-                        print(f"FFmpeg failed: {result.stderr}")
+                        print(f"❌ FFmpeg failed: {result.stderr}")
                         return ""
+                    else:
+                        print(f"✅ FFmpeg audio extraction successful")
                         
                 except Exception as download_e:
-                    print(f"Direct video download failed: {download_e}")
+                    print(f"❌ Direct video download failed: {download_e}")
                     return ""
             
             # Find the audio file
@@ -1337,12 +1342,13 @@ async def extract_and_transcribe_audio(url: str, strategy_name: str, proxy: str 
                     break
             
             if not audio_file or not audio_file.exists():
-                print("No audio file found after extraction")
+                print("❌ No audio file found after extraction")
                 return ""
             
-            print(f"Audio file ready: {audio_file.name}, size: {audio_file.stat().st_size} bytes")
+            print(f"✅ Audio file ready: {audio_file.name}, size: {audio_file.stat().st_size} bytes")
             
             # Transcribe audio using OpenAI Whisper
+            print(f"🎙️ Transcribing audio with Whisper...")
             with audio_file.open("rb") as f:
                 transcript = client.audio.transcriptions.create(
                     model="whisper-1", 
@@ -1350,7 +1356,14 @@ async def extract_and_transcribe_audio(url: str, strategy_name: str, proxy: str 
                     response_format="text"
                 )
             
-            return transcript.strip() if transcript else ""
+            transcript_text = transcript.strip() if transcript else ""
+            if transcript_text:
+                print(f"✅ Audio transcription successful: {len(transcript_text)} chars")
+                print(f"🗣️ Transcript preview: {repr(transcript_text[:150])}...")
+            else:
+                print("⚠️ Audio transcription returned empty result")
+                
+            return transcript_text
                     
     except Exception as e:
         print(f"Audio transcription failed: {type(e).__name__}: {e}")
