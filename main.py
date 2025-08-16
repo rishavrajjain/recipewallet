@@ -1183,6 +1183,84 @@ async def generate_step_image(idx: int, comp: Dict[str, str]) -> Dict[str, str]:
     url = f"{BASE_URL}/images/{image_filename}"
     return {"step_number": idx, "image_url": url}
 
+async def extract_and_transcribe_audio(url: str, strategy_name: str, proxy: str = None) -> str:
+    """Extract audio from social media video and transcribe it using OpenAI Whisper"""
+    
+    print(f"🎵 Attempting audio extraction for {strategy_name}")
+    
+    try:
+        # Use yt-dlp specifically for audio extraction (more reliable than parsing video URLs)
+        import tempfile
+        from pathlib import Path
+        
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            
+            # Configure yt-dlp for audio-only extraction
+            ydl_opts = {
+                "format": "bestaudio/best",
+                "outtmpl": str(tmp_path / "%(id)s.%(ext)s"),
+                "quiet": True,
+                "no_warnings": True,
+                "extract_flat": False,
+                "postprocessors": [{
+                    "key": "FFmpegExtractAudio",
+                    "preferredcodec": "mp3",
+                    "preferredquality": "192"
+                }],
+                "http_headers": {
+                    "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Mobile/15E148 Safari/604.1"
+                },
+                "socket_timeout": 30,
+                "retries": 2,
+                "fragment_retries": 2,
+                "extractor_retries": 2,
+            }
+            
+            # Add proxy if available
+            if proxy:
+                ydl_opts["proxy"] = proxy
+                print(f"Using proxy for audio extraction: {mask_proxy(proxy)}")
+            
+            # Extract audio using yt-dlp
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                try:
+                    info = ydl.extract_info(url, download=True)
+                    if not info:
+                        return ""
+                    
+                    # Find the downloaded audio file
+                    audio_file = None
+                    for ext in ["mp3", "m4a", "webm", "opus"]:
+                        potential_file = tmp_path / f"{info['id']}.{ext}"
+                        if potential_file.exists():
+                            audio_file = potential_file
+                            break
+                    
+                    if not audio_file or not audio_file.exists():
+                        print("No audio file found after extraction")
+                        return ""
+                    
+                    print(f"Audio file extracted: {audio_file.name}, size: {audio_file.stat().st_size} bytes")
+                    
+                    # Transcribe audio using OpenAI Whisper
+                    with audio_file.open("rb") as f:
+                        transcript = client.audio.transcriptions.create(
+                            model="whisper-1", 
+                            file=f,
+                            response_format="text"
+                        )
+                    
+                    return transcript.strip() if transcript else ""
+                    
+                except Exception as ydl_e:
+                    print(f"yt-dlp audio extraction failed: {ydl_e}")
+                    return ""
+                    
+    except Exception as e:
+        print(f"Audio transcription failed: {type(e).__name__}: {e}")
+        return ""
+
 async def handle_tiktok_fallback(link: str):
     """Specialized TikTok fallback when yt-dlp fails"""
     print(f"🚀 STARTING TIKTOK SPECIALIZED FALLBACK for: {link}")
@@ -1333,6 +1411,18 @@ async def handle_tiktok_fallback(link: str):
                     print(f"Found thumbnail: {thumbnail_url[:100]}...")
                     break
             
+            # Try to extract and transcribe audio
+            audio_transcript = ""
+            try:
+                audio_transcript = await extract_and_transcribe_audio(link, strategy["name"], selected_proxy)
+                if audio_transcript:
+                    print(f"Audio transcript extracted: {len(audio_transcript)} chars")
+                    print(f"AUDIO CONTENT: {repr(audio_transcript[:200])}...")
+                    # Combine caption and audio for richer content
+                    caption = f"{caption} {audio_transcript}".strip()
+            except Exception as audio_e:
+                print(f"Audio extraction failed: {audio_e}")
+            
             # If we got reasonable content, create recipe
             if len(caption) > 15 or thumbnail_url:
                 # Enhanced quality check - look for recipe-related keywords and anti-hallucination
@@ -1362,7 +1452,8 @@ async def handle_tiktok_fallback(link: str):
                     print(f"✅ TikTok fallback successful - Quality score: {quality_score}/10, Content is recipe-related")
                     recipe = extract_recipe(
                         caption or "TikTok recipe video", 
-                        "", "", 
+                        "", 
+                        audio_transcript, 
                         thumbnail_url, 
                         "tiktok", 
                         "", "", 
@@ -1612,7 +1703,19 @@ async def import_recipe(req: Request):
                         print(f"TikTok pattern extraction failed: {pattern_e}")
                         raise HTTPException(502, "TikTok extraction failed. Content may be region-blocked or age-restricted.")
 
-            recipe = extract_recipe(caption, "", "", fallback_thumb, platform, handle, "", link)
+            # Try to extract audio transcript for Instagram and other platforms
+            audio_transcript = ""
+            if platform in ["instagram", "tiktok"]:
+                try:
+                    print(f"🎵 Attempting audio extraction for {platform}")
+                    audio_transcript = await extract_and_transcribe_audio(link, f"{platform}_fallback", selected_proxy)
+                    if audio_transcript:
+                        print(f"Audio transcript extracted: {len(audio_transcript)} chars")
+                        caption = f"{caption} {audio_transcript}".strip()
+                except Exception as audio_e:
+                    print(f"Audio extraction failed for {platform}: {audio_e}")
+            
+            recipe = extract_recipe(caption, "", audio_transcript, fallback_thumb, platform, handle, "", link)
             return {"success": True, "recipe": recipe, "source": "fallback", "warning": "Used fallback extraction."}
         except Exception as e2:
             print(f"Fallback scrape failed: {e2}")
